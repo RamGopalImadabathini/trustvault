@@ -28,7 +28,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     const value = env[name];
     return (
       value === undefined ||
-      Buffer.byteLength(value, "utf8") < MIN_SECRET_BYTES ||
+      (name !== "DATABASE_URL" &&
+        Buffer.byteLength(value, "utf8") < MIN_SECRET_BYTES) ||
       (name === "DATABASE_URL" && !isPostgresUrl(value))
     );
   });

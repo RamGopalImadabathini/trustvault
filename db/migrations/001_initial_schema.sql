@@ -209,17 +209,15 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON FUNCTION reject_audit_mutation() FROM PUBLIC;
 
 GRANT USAGE ON SCHEMA public TO trustvault_app;
-GRANT SELECT, INSERT, UPDATE ON
-  users,
-  sessions,
-  folders,
-  documents,
-  document_versions,
-  document_grants,
-  groups,
-  group_members,
-  download_tokens,
-  ai_suggestions
-TO trustvault_app;
+GRANT SELECT, INSERT ON users TO trustvault_app;
+GRANT SELECT, INSERT ON sessions TO trustvault_app;
+GRANT SELECT, INSERT ON folders TO trustvault_app;
+GRANT SELECT, INSERT ON documents TO trustvault_app;
+GRANT SELECT, INSERT ON document_versions TO trustvault_app;
+GRANT SELECT, INSERT ON document_grants TO trustvault_app;
+GRANT SELECT, INSERT ON groups TO trustvault_app;
+GRANT SELECT, INSERT ON group_members TO trustvault_app;
+GRANT SELECT, INSERT ON download_tokens TO trustvault_app;
+GRANT SELECT, INSERT ON ai_suggestions TO trustvault_app;
 GRANT SELECT, INSERT ON audit_log TO trustvault_app;
 GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO trustvault_app;

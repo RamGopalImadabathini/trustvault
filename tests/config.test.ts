@@ -21,6 +21,15 @@ describe("loadConfig", () => {
     });
   });
 
+  it("does not apply the secret length requirement to a valid database URL", () => {
+    expect(() =>
+      loadConfig({
+        ...validEnv,
+        DATABASE_URL: "postgres://x/y"
+      })
+    ).not.toThrow();
+  });
+
   it("reports all missing and undersized variables together", () => {
     expect(() => loadConfig({})).toThrowError(
       "DATABASE_URL, MASTER_KEY, AUDIT_HMAC_SECRET, SESSION_SECRET"
@@ -52,7 +61,11 @@ describe("loadConfig", () => {
     }
   });
 
-  it.each(["http://localhost/db", "postgresql://", "not-a-url"])(
+  it.each([
+    "http://localhost:5432/trustvault",
+    "postgresql://[broken-host]/trustvault",
+    "x".repeat(32)
+  ])(
     "rejects unsupported or malformed database URLs: %s",
     (databaseUrl) => {
       expect(() => loadConfig({ ...validEnv, DATABASE_URL: databaseUrl }))
