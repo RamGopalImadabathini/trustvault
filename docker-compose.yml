@@ -6,6 +6,8 @@ services:
       POSTGRES_USER: trustvault_migrator
       POSTGRES_PASSWORD: ${POSTGRES_MIGRATOR_PASSWORD:?Set POSTGRES_MIGRATOR_PASSWORD in .env}
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -14,6 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    profiles: ["local"]
 
   migrate:
     build:
@@ -26,6 +29,26 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+    profiles: ["local"]
+
+  seed:
+    build:
+      context: .
+      target: build
+    command: ["npm", "run", "seed"]
+    environment:
+      DATABASE_URL: postgresql://trustvault_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}@db:5432/trustvault
+      MASTER_KEY: ${MASTER_KEY:?Set MASTER_KEY in .env}
+      AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:?Set AUDIT_HMAC_SECRET in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      STORAGE_DIRECTORY: /app/storage
+    volumes:
+      - storage_data:/app/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    profiles: ["local"]
 
   api:
     build:
@@ -39,9 +62,12 @@ services:
       PORT: "3000"
     ports:
       - "3000:3000"
+    volumes:
+      - storage_data:/app/storage
     depends_on:
       migrate:
         condition: service_completed_successfully
+    profiles: ["local"]
 
   web:
     build:
@@ -52,6 +78,8 @@ services:
       - "5173:5173"
     depends_on:
       - api
+    profiles: ["local"]
 
 volumes:
   postgres_data:
+  storage_data:
