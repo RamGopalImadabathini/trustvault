@@ -380,12 +380,51 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       ).statusCode
     ).toBe(404);
 
+    const tokenBeforeDelete = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/download-tokens`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    const tokenForDeleted = tokenBeforeDelete.json().token as string;
+    const versionBeforeDelete = await pool.query<{ id: string }>(
+      `SELECT id::text FROM document_versions
+       WHERE document_id = $1 ORDER BY version_number DESC LIMIT 1`,
+      [documentId]
+    );
+    const versionForDeleted = versionBeforeDelete.rows[0]?.id;
+    expect(versionForDeleted).toBeTruthy();
     const softDelete = await app.inject({
       method: "DELETE",
       url: `/api/documents/${documentId}`,
       headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
     });
     expect(softDelete.statusCode).toBe(200);
+    const deletedAccessAttempts = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/versions`,
+        headers: { cookie: owner.cookie }
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/versions/${versionForDeleted}/download`,
+        headers: { cookie: owner.cookie }
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/download`,
+        headers: { cookie: owner.cookie }
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/downloads/${tokenForDeleted}`,
+        headers: { cookie: owner.cookie }
+      })
+    ]);
+    for (const response of deletedAccessAttempts) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "Not found" });
+    }
     const deletedMetadata = await app.inject({
       method: "GET",
       url: `/api/documents/${documentId}`,
@@ -847,9 +886,164 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
     expect(deniedVersionDownload.json()).toEqual({ error: "Not found" });
   }, 30_000);
 
+  it("denies an ungranted caller on every document-content and permission route", async () => {
+    const owner = await login("owner.one@trustvault.local");
+    const ungrantedViewer = await login("viewer.two@trustvault.local");
+    const admin = await login("admin@trustvault.local");
+    const grantResponse = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/grants`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { userId: ungrantedViewer.id, level: "read" }
+    });
+    expect(grantResponse.statusCode).toBe(201);
+    const versionList = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions`,
+      headers: { cookie: ungrantedViewer.cookie }
+    });
+    const versionId = versionList.json().versions[0]?.id as string;
+    expect(versionList.statusCode).toBe(200);
+    const suggestion = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/ai-suggestions`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    expect(suggestion.statusCode).toBe(201);
+    const suggestionId = suggestion.json().id as string;
+    await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}/grants/${ungrantedViewer.id}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+
+    const unauthenticatedViewer: Record<string, string> = {
+      cookie: ungrantedViewer.cookie
+    };
+    const csrfViewer: Record<string, string> = {
+      cookie: ungrantedViewer.cookie,
+      "x-csrf-token": ungrantedViewer.csrf
+    };
+    const deniedRequests = [
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "PATCH",
+        url: `/api/documents/${documentId}`,
+        headers: csrfViewer,
+        payload: { title: "unauthorized" }
+      }),
+      app.inject({
+        method: "DELETE",
+        url: `/api/documents/${documentId}`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/restore`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/grants`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/grant-targets`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/grants`,
+        headers: csrfViewer,
+        payload: { userId: admin.id, level: "read" }
+      }),
+      app.inject({
+        method: "DELETE",
+        url: `/api/documents/${documentId}/grants/${admin.id}`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/versions`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/versions/${versionId}`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/versions/${versionId}/download`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/versions`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/download-tokens`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/download`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/ai-suggestions`,
+        headers: csrfViewer
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/ai-suggestions/${suggestionId}/decision`,
+        headers: csrfViewer,
+        payload: { decision: "accepted" }
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/documents?q=${encodeURIComponent(testTitle)}`,
+        headers: unauthenticatedViewer
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/search?q=${encodeURIComponent(testTitle)}`,
+        headers: unauthenticatedViewer
+      })
+    ];
+    const responses = await Promise.all(deniedRequests);
+    for (const response of responses.slice(0, 16)) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "Not found" });
+    }
+    expect(responses[16]?.json().documents).toEqual([]);
+    expect(responses[17]?.json().results).toEqual([]);
+    await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}/grants/${ungrantedViewer.id}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+  }, 30_000);
+
   it("revokes sessions after a role change or deactivation", async () => {
     const admin = await login("admin@trustvault.local");
     const viewer = await login("viewer.three@trustvault.local");
+    const owner = await login("owner.one@trustvault.local");
+    const grant = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/grants`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { userId: viewer.id, level: "read" }
+    });
+    expect(grant.statusCode).toBe(201);
     const roleChange = await app.inject({
       method: "PATCH",
       url: `/api/admin/users/${viewer.id}`,
@@ -866,6 +1060,15 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
         })
       ).statusCode
     ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/api/documents/${documentId}`,
+          headers: { cookie: viewer.cookie }
+        })
+      ).statusCode
+    ).toBe(404);
 
     const newSession = await login("viewer.three@trustvault.local");
     const deactivate = await app.inject({
@@ -892,6 +1095,11 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       payload: { isActive: true, role: "viewer" }
     });
     expect(restore.statusCode).toBe(200);
+    await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}/grants/${viewer.id}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
   });
 
   it("keeps login errors uniform and locks accounts after repeated failures", async () => {

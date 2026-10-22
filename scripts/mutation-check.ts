@@ -177,7 +177,7 @@ async function runMutation(mutation: Mutation): Promise<MutationResult> {
         cwd: projectRoot,
         encoding: "utf8",
         windowsHide: true,
-        timeout: 120_000
+        timeout: 240_000
       }
     );
 
