@@ -56,10 +56,12 @@ services:
       target: runtime
     environment:
       DATABASE_URL: postgresql://trustvault_app:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}@db:5432/trustvault
+      DB_MIGRATION_URL: postgresql://trustvault_migrator:${POSTGRES_MIGRATOR_PASSWORD:?Set POSTGRES_MIGRATOR_PASSWORD in .env}@db:5432/trustvault
       MASTER_KEY: ${MASTER_KEY:?Set MASTER_KEY in .env}
       AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:?Set AUDIT_HMAC_SECRET in .env}
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
       PORT: "3000"
+      STORAGE_DIRECTORY: /app/storage
     ports:
       - "3000:3000"
     volumes:

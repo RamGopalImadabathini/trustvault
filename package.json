@@ -17,6 +17,7 @@
     "mutation-check": "tsx scripts/mutation-check.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
+    "smoke-test": "tsx scripts/smoke-test.ts",
     "verify-chain": "tsx scripts/verify-chain.ts",
     "start": "node dist/server/main.js"
   },
@@ -30,7 +31,8 @@
     "fastify": "^5.12.5",
     "pg": "^8.13.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -45,7 +47,6 @@
     "eslint-plugin-react-refresh": "^0.4.16",
     "globals": "^15.14.0",
     "supertest": "^7.0.0",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.1",
     "vite": "^6.4.4",
