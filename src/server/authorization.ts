@@ -20,7 +20,17 @@ export const AUTHZ_ACTIONS = [
   "document.download",
   "document.download.issue",
   "document.search",
-  "admin.users.manage"
+  "admin.users.manage",
+  "admin.audit.read",
+  "admin.audit.verify",
+  "admin.anomalies.read",
+  "folder.list",
+  "folder.create",
+  "folder.manage",
+  "document.version.read",
+  "document.ai.suggest",
+  "document.ai.decide",
+  "document.grant.targets"
 ] as const;
 
 export type AuthzAction = (typeof AUTHZ_ACTIONS)[number];

@@ -19,9 +19,11 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
   let pool: Pool;
   let cleanupPool: Pool;
   let documentId: string;
+  let folderId: string;
   let uploadStorageKey: string;
   let testTitle: string;
   let baseUrl: string;
+  const generatedUserIds: string[] = [];
 
   beforeAll(async () => {
     const config = loadConfig(process.env);
@@ -58,6 +60,9 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       await cleanupPool.query("DELETE FROM document_grants WHERE document_id = $1", [
         documentId
       ]);
+      await cleanupPool.query("DELETE FROM ai_suggestions WHERE document_id = $1", [
+        documentId
+      ]);
       await cleanupPool.query(
         "UPDATE documents SET current_version_id = NULL WHERE id = $1",
         [documentId]
@@ -75,6 +80,18 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
         )
       );
     }
+    if (folderId) {
+      await cleanupPool.query(
+        "UPDATE documents SET folder_id = NULL WHERE folder_id = $1",
+        [folderId]
+      );
+      await cleanupPool.query("DELETE FROM folders WHERE id = $1", [folderId]);
+    }
+    if (generatedUserIds.length > 0) {
+      await cleanupPool.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [
+        generatedUserIds
+      ]);
+    }
     await app?.close();
     await pool?.end();
     await cleanupPool?.end();
@@ -89,6 +106,7 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
 
     const form = new FormData();
     form.set("title", testTitle);
+    form.set("category", "integration-category");
     form.set(
       "file",
       new Blob(["%PDF-1.7 trusted demo document\n"], {
@@ -474,6 +492,360 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
     expect(audit.rows.some((row) => row.action === "document.download")).toBe(true);
     expect(uploadStorageKey).toBeTruthy();
   }, 60_000);
+
+  it("keeps search, folders, versions, AI decisions, and admin metadata scoped", async () => {
+    const owner = await login("owner.one@trustvault.local");
+    const viewer = await login("viewer.one@trustvault.local");
+    const otherViewer = await login("viewer.two@trustvault.local");
+    const admin = await login("admin@trustvault.local");
+    const today = new Date().toISOString().slice(0, 10);
+
+    const ownerSearch = await app.inject({
+      method: "GET",
+      url: `/api/documents?name=${encodeURIComponent(testTitle)}&owner=Owner%20One&category=integration-category&from=${today}&to=${today}`,
+      headers: { cookie: owner.cookie }
+    });
+    expect(ownerSearch.statusCode).toBe(200);
+    expect(ownerSearch.json().documents.map((item: { id: string }) => item.id)).toContain(
+      documentId
+    );
+
+    const folder = await app.inject({
+      method: "POST",
+      url: "/api/folders",
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { name: `integration-folder-${randomUUID()}` }
+    });
+    expect(folder.statusCode).toBe(201);
+    folderId = folder.json().id as string;
+    await cleanupPool.query(
+      "UPDATE documents SET folder_id = $2 WHERE id = $1",
+      [documentId, folderId]
+    );
+    const visibleFolder = await app.inject({
+      method: "GET",
+      url: "/api/folders",
+      headers: { cookie: otherViewer.cookie }
+    });
+    expect(visibleFolder.json().folders.map((item: { id: string }) => item.id)).toContain(
+      folderId
+    );
+    const deniedThroughFolder = await app.inject({
+      method: "GET",
+      url: `/api/documents?q=${encodeURIComponent(testTitle)}`,
+      headers: { cookie: otherViewer.cookie }
+    });
+    expect(deniedThroughFolder.json().documents).toEqual([]);
+    const viewerFolderMutation = await app.inject({
+      method: "PATCH",
+      url: `/api/folders/${folderId}`,
+      headers: { cookie: otherViewer.cookie, "x-csrf-token": otherViewer.csrf },
+      payload: { name: "unauthorized folder change" }
+    });
+    expect(viewerFolderMutation.statusCode).toBe(403);
+
+    const grant = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/grants`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { userId: viewer.id, level: "read" }
+    });
+    expect(grant.statusCode).toBe(201);
+    const filterSearch = await app.inject({
+      method: "GET",
+      url: `/api/search?category=integration-category&owner=Owner%20One`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(filterSearch.json().results.map((item: { id: string }) => item.id)).toContain(
+      documentId
+    );
+
+    const versions = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(versions.statusCode).toBe(200);
+    const versionId = versions.json().versions[0]?.id as string;
+    const versionMetadata = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions/${versionId}`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(versionMetadata.statusCode).toBe(200);
+    const versionDownload = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions/${versionId}/download`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(versionDownload.statusCode).toBe(200);
+    expect(versionDownload.body).toContain("trusted demo document");
+
+    const deniedVersionForm = new FormData();
+    deniedVersionForm.set(
+      "file",
+      new Blob(["%PDF-1.7 unauthorized version\n"], {
+        type: "application/pdf"
+      }),
+      "unauthorized-version.pdf"
+    );
+    const deniedVersionCreate = await fetch(
+      `${baseUrl}/api/documents/${documentId}/versions`,
+      {
+        method: "POST",
+        headers: { Cookie: viewer.cookie, "x-csrf-token": viewer.csrf },
+        body: deniedVersionForm
+      }
+    );
+    expect(deniedVersionCreate.status).toBe(404);
+
+    const editGrant = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/grants`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { userId: otherViewer.id, level: "edit" }
+    });
+    expect(editGrant.statusCode).toBe(201);
+    const versionForm = new FormData();
+    versionForm.set(
+      "file",
+      new Blob(["%PDF-1.7 second authorized version\n"], {
+        type: "application/pdf"
+      }),
+      "second-version.pdf"
+    );
+    const createdVersion = await fetch(
+      `${baseUrl}/api/documents/${documentId}/versions`,
+      {
+        method: "POST",
+        headers: {
+          Cookie: otherViewer.cookie,
+          "x-csrf-token": otherViewer.csrf
+        },
+        body: versionForm
+      }
+    );
+    expect(createdVersion.status).toBe(201);
+    const secondVersion = (await createdVersion.json()) as {
+      id: string;
+      versionNumber: number;
+    };
+    expect(secondVersion.versionNumber).toBe(2);
+    const secondVersionDownload = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions/${secondVersion.id}/download`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(secondVersionDownload.statusCode).toBe(200);
+    expect(secondVersionDownload.body).toContain("second authorized version");
+
+    const suggestions = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/ai-suggestions`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    expect(suggestions.statusCode).toBe(201);
+    const suggestionBody = suggestions.json() as {
+      id: string;
+      suggestions: { userId: string; reason: string }[];
+    };
+    expect(suggestionBody.suggestions.length).toBeGreaterThan(0);
+    const candidateId = suggestionBody.suggestions[0]?.userId;
+    const grantCountBeforeDecision = await pool.query(
+      `SELECT count(*)::int AS count FROM document_grants
+       WHERE document_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+      [documentId, candidateId]
+    );
+    const decision = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/ai-suggestions/${suggestionBody.id}/decision`,
+      headers: { cookie: viewer.cookie, "x-csrf-token": viewer.csrf },
+      payload: { decision: "accepted" }
+    });
+    expect(decision.statusCode).toBe(404);
+    const ownerDecision = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/ai-suggestions/${suggestionBody.id}/decision`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { decision: "accepted" }
+    });
+    expect(ownerDecision.statusCode).toBe(200);
+    expect(ownerDecision.json().grantCreated).toBe(false);
+    const grantCountAfterDecision = await pool.query(
+      `SELECT count(*)::int AS count FROM document_grants
+       WHERE document_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+      [documentId, candidateId]
+    );
+    expect(grantCountAfterDecision.rows[0]?.count).toBe(
+      grantCountBeforeDecision.rows[0]?.count
+    );
+
+    const softDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    expect(softDelete.statusCode).toBe(200);
+    const unauthorizedDeletedSearch = await app.inject({
+      method: "GET",
+      url: `/api/documents?q=${encodeURIComponent(testTitle)}&includeDeleted=true`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(unauthorizedDeletedSearch.json().documents).toEqual([]);
+    const hiddenDeleted = await app.inject({
+      method: "GET",
+      url: `/api/documents?q=${encodeURIComponent(testTitle)}`,
+      headers: { cookie: owner.cookie }
+    });
+    expect(hiddenDeleted.json().documents).toEqual([]);
+    const recoveredSearch = await app.inject({
+      method: "GET",
+      url: `/api/documents?q=${encodeURIComponent(testTitle)}&includeDeleted=true`,
+      headers: { cookie: owner.cookie }
+    });
+    expect(recoveredSearch.json().documents.map((item: { id: string }) => item.id)).toContain(
+      documentId
+    );
+    const restore = await app.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/restore`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    expect(restore.statusCode).toBe(200);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const denied = await app.inject({
+        method: "GET",
+        url: `/api/documents/${randomUUID()}`,
+        headers: { cookie: otherViewer.cookie }
+      });
+      expect(denied.statusCode).toBe(404);
+    }
+    for (let download = 0; download < 20; download += 1) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/documents/${documentId}/download`,
+        headers: { cookie: viewer.cookie }
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    for (let index = 0; index < 10; index += 1) {
+      const user = await cleanupPool.query<{ id: string }>(
+        `INSERT INTO users (email, display_name, password_hash, role)
+         SELECT $1, $2, password_hash, 'viewer'
+         FROM users WHERE id = $3
+         RETURNING id::text`,
+        [
+          `phase-test-${randomUUID()}@trustvault.local`,
+          `Phase Test Viewer ${index}`,
+          owner.id
+        ]
+      );
+      const userId = user.rows[0]?.id;
+      if (!userId) {
+        throw new Error("Could not create anomaly test user.");
+      }
+      generatedUserIds.push(userId);
+      const createdGrant = await app.inject({
+        method: "POST",
+        url: `/api/documents/${documentId}/grants`,
+        headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+        payload: { userId, level: "read" }
+      });
+      expect(createdGrant.statusCode).toBe(201);
+    }
+
+    const adminAudit = await app.inject({
+      method: "GET",
+      url: "/api/admin/audit?limit=100",
+      headers: { cookie: admin.cookie }
+    });
+    expect(adminAudit.statusCode).toBe(200);
+    const hiddenDocumentEvents = adminAudit
+      .json()
+      .events.filter((event: { action: string }) =>
+        ["document.read_metadata", "document.download"].includes(event.action)
+      );
+    expect(hiddenDocumentEvents.length).toBeGreaterThan(0);
+    expect(
+      hiddenDocumentEvents.every(
+        (event: { document_id: string | null; document_title: string | null }) =>
+          event.document_id === null && event.document_title === null
+      )
+    ).toBe(true);
+    const adminAnomalies = await app.inject({
+      method: "GET",
+      url: "/api/admin/anomalies",
+      headers: { cookie: admin.cookie }
+    });
+    const currentFlags = adminAnomalies.json().anomalies as {
+      type: string;
+      count: number;
+    }[];
+    expect(currentFlags.map((item) => item.type)).toEqual(
+      expect.arrayContaining(["repeated_denials", "bulk_downloads", "grant_bursts"])
+    );
+    expect(JSON.stringify(adminAnomalies.json())).not.toContain(testTitle);
+
+    const invalidChainApp = createApp({
+      pool,
+      config: loadConfig(process.env),
+      storageDirectory: path.resolve(process.env.STORAGE_DIRECTORY ?? "storage"),
+      aiSuggestionProvider: {
+        name: "test-provider",
+        suggest: async ({ metadata }) => {
+          expect(Object.keys(metadata).sort()).toEqual([
+            "category",
+            "description",
+            "ownerName",
+            "title"
+          ]);
+          return [{ userId: randomUUID(), reason: "Not an eligible candidate." }];
+        }
+      },
+      auditVerifier: async () => ({
+        valid: false,
+        checked: 10,
+        firstInvalidId: "7"
+      })
+    });
+    await invalidChainApp.ready();
+    const providerSuggestion = await invalidChainApp.inject({
+      method: "POST",
+      url: `/api/documents/${documentId}/ai-suggestions`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    expect(providerSuggestion.statusCode).toBe(201);
+    expect(providerSuggestion.json().suggestions).toEqual([]);
+    const invalidAnomalies = await invalidChainApp.inject({
+      method: "GET",
+      url: "/api/admin/anomalies",
+      headers: { cookie: admin.cookie }
+    });
+    expect(invalidAnomalies.json().anomalies).toContainEqual({
+      type: "failed_chain_verification",
+      count: 1
+    });
+    await invalidChainApp.close();
+
+    await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}/grants/${viewer.id}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}/grants/${otherViewer.id}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf }
+    });
+    const deniedVersionDownload = await app.inject({
+      method: "GET",
+      url: `/api/documents/${documentId}/versions/${secondVersion.id}/download`,
+      headers: { cookie: viewer.cookie }
+    });
+    expect(deniedVersionDownload.statusCode).toBe(404);
+    expect(deniedVersionDownload.json()).toEqual({ error: "Not found" });
+  }, 30_000);
 
   it("revokes sessions after a role change or deactivation", async () => {
     const admin = await login("admin@trustvault.local");

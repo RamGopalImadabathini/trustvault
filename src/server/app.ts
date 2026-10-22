@@ -14,7 +14,15 @@ import type {
 } from "fastify";
 import Fastify from "fastify";
 import type { Pool, PoolClient } from "pg";
-import { appendAudit } from "./audit.js";
+import { appendAudit, verifyAuditChain } from "./audit.js";
+import { countOffHoursAccess } from "./anomalies.js";
+import {
+  deterministicSuggestions,
+  validateSuggestions,
+  type AiSuggestionProvider,
+  type SuggestionCandidate,
+  type SuggestionMetadata
+} from "./ai.js";
 import {
   authorize,
   validateRouteRegistry,
@@ -43,6 +51,8 @@ export interface AppDependencies {
   config: AppConfig;
   storageDirectory: string;
   malwareScanner?: (upload: ReturnType<typeof validateUpload>) => Promise<"clean" | "rejected">;
+  aiSuggestionProvider?: AiSuggestionProvider;
+  auditVerifier?: typeof verifyAuditChain;
 }
 
 interface RouteResult {
@@ -51,6 +61,8 @@ interface RouteResult {
   headers?: Record<string, string>;
   stream?: Buffer;
   afterResponse?: () => Promise<void>;
+  auditOutcome?: "allowed" | "denied";
+  auditReason?: string;
 }
 
 interface RouteContext {
@@ -282,8 +294,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
               actor,
               documentId,
               action,
-              status >= 400 ? "denied" : "allowed",
-              status >= 400 ? "request_rejected" : "allowed"
+              result.auditOutcome ?? (status >= 400 ? "denied" : "allowed"),
+              result.auditReason ?? (status >= 400 ? "request_rejected" : "allowed")
             )
           );
           await client.query("COMMIT");
@@ -559,8 +571,36 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
         titleField && "value" in titleField && typeof titleField.value === "string"
           ? titleField.value.trim()
           : "";
+      const categoryField = part.fields.category;
+      const category =
+        categoryField &&
+        "value" in categoryField &&
+        typeof categoryField.value === "string"
+          ? categoryField.value.trim()
+          : null;
+      const folderField = part.fields.folderId;
+      const folderId =
+        folderField && "value" in folderField && typeof folderField.value === "string"
+          ? folderField.value
+          : null;
       if (!actor || title.length < 1 || title.length > 500) {
         return { status: 400, body: { error: "Invalid upload" } };
+      }
+      if (
+        (category !== null && category.length > 100) ||
+        (folderId !== null && !DOC_ID_PATTERN.test(folderId))
+      ) {
+        return { status: 400, body: { error: "Invalid upload" } };
+      }
+      if (folderId) {
+        const folder = await client.query(
+          `SELECT 1 FROM folders
+           WHERE id = $1 AND deleted_at IS NULL`,
+          [folderId]
+        );
+        if (folder.rowCount !== 1) {
+          return { status: 400, body: { error: "Invalid upload" } };
+        }
       }
       let upload;
       try {
@@ -584,9 +624,16 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       try {
         const doc = await client.query<{ id: string }>(
           `INSERT INTO documents
-            (owner_id, title, declared_mime_type, original_filename)
-           VALUES ($1, $2, $3, $4) RETURNING id::text`,
-          [actor.id, title, upload.mimeType, upload.filename]
+            (owner_id, title, category, folder_id, declared_mime_type, original_filename)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id::text`,
+          [
+            actor.id,
+            title,
+            category || null,
+            folderId,
+            upload.mimeType,
+            upload.filename
+          ]
         );
         const documentId = doc.rows[0]?.id;
         if (!documentId) {
@@ -598,7 +645,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
           documentId,
           encrypted,
           upload.mimeType,
-          scanResult
+          scanResult,
+          1
         );
         await client.query(
           "UPDATE documents SET current_version_id = $2, updated_at = now() WHERE id = $1",
@@ -618,29 +666,439 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   register({
     method: "GET",
-    url: "/api/documents",
-    action: "document.search",
+    url: "/api/folders",
+    action: "folder.list",
+    documentId: async () => null,
+    handle: async ({ client, actor }) => {
+      if (!actor) {
+        return { status: 401, body: LOGIN_FAILURE };
+      }
+      const folders = await client.query(
+        `SELECT id::text, name, parent_id::text, created_at
+         FROM folders
+         WHERE deleted_at IS NULL
+         ORDER BY name`,
+        []
+      );
+      return { body: { folders: folders.rows } };
+    }
+  });
+
+  register({
+    method: "POST",
+    url: "/api/folders",
+    action: "folder.create",
+    documentId: async () => null,
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 200 }
+        }
+      }
+    },
     handle: async ({ client, actor, request }) => {
       if (!actor) {
         return { status: 401, body: LOGIN_FAILURE };
       }
-      const query = (request.query as { q?: string }).q?.trim() ?? "";
-      if (query.length > 200) {
-        return { status: 400, body: { error: "Invalid search" } };
+      const name = (request.body as { name: string }).name.trim();
+      if (name.length === 0) {
+        return { status: 400, body: { error: "Invalid folder" } };
       }
-      const result = await client.query(
-        `SELECT d.id::text, d.title, d.description, d.created_at
-         FROM documents d
-         WHERE d.deleted_at IS NULL
-           AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')
-           AND ($2 = '' OR d.title ILIKE '%' || $2 || '%' OR d.description ILIKE '%' || $2 || '%')
-         ORDER BY d.created_at DESC
-         LIMIT 50`,
-        [actor.id, query]
+      const result = await client.query<{ id: string }>(
+        `INSERT INTO folders (name, created_by)
+         VALUES ($1, $2) RETURNING id::text`,
+        [name, actor.id]
       );
-      return { body: { documents: result.rows } };
+      return { status: 201, body: { id: result.rows[0]?.id, name } };
     }
   });
+
+  register({
+    method: "POST",
+    url: "/api/documents/:id/ai-suggestions",
+    action: "document.ai.suggest",
+    handle: async ({ client, actor, documentId, request }) => {
+      if (!actor || !documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const documentResult = await client.query<{
+        title: string;
+        description: string | null;
+        category: string | null;
+        owner_name: string;
+      }>(
+        `SELECT d.title, d.description, d.category, u.display_name AS owner_name
+         FROM documents d JOIN users u ON u.id = d.owner_id
+         WHERE d.id = $1 AND d.deleted_at IS NULL`,
+        [documentId]
+      );
+      const metadata = documentResult.rows[0];
+      if (!metadata) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const candidateResult = await client.query<{
+        user_id: string;
+        display_name: string;
+        role: SuggestionCandidate["role"];
+      }>(
+        `SELECT u.id::text AS user_id, u.display_name, u.role
+         FROM users u
+         WHERE u.is_active = true AND u.id <> $2
+           AND u.role IN ('owner', 'viewer')
+           AND NOT EXISTS (
+             SELECT 1 FROM document_grants g
+             WHERE g.document_id = $1 AND g.user_id = u.id
+               AND g.revoked_at IS NULL
+               AND (g.expires_at IS NULL OR g.expires_at > now())
+           )
+         ORDER BY u.role, u.display_name
+         LIMIT 100`,
+        [documentId, actor.id]
+      );
+      const candidates: SuggestionCandidate[] = candidateResult.rows.map((row) => ({
+        userId: row.user_id,
+        displayName: row.display_name,
+        role: row.role
+      }));
+      const suggestionMetadata: SuggestionMetadata = {
+        title: metadata.title,
+        description: metadata.description,
+        category: metadata.category,
+        ownerName: metadata.owner_name
+      };
+      const provider = dependencies.aiSuggestionProvider;
+      let providerName = "deterministic-fallback";
+      let validated;
+      if (provider) {
+        providerName = provider.name.slice(0, 100);
+        try {
+          const output = await provider.suggest({
+            metadata: suggestionMetadata,
+            candidates
+          });
+          validated = validateSuggestions(output, candidates);
+        } catch (error) {
+          request.log.error({ err: error }, "AI suggestion provider failed");
+          return { status: 503, body: { error: "Suggestions temporarily unavailable" } };
+        }
+      } else {
+        validated = deterministicSuggestions(candidates);
+      }
+      const metadataHash = createHash("sha256")
+        .update(JSON.stringify(suggestionMetadata))
+        .digest();
+      const result = await client.query<{ id: string }>(
+        `INSERT INTO ai_suggestions
+          (document_id, requested_by, provider, input_metadata_hash, suggestions)
+         VALUES ($1, $2, $3, $4, $5::jsonb)
+         RETURNING id::text`,
+        [
+          documentId,
+          actor.id,
+          providerName || "provider",
+          metadataHash,
+          JSON.stringify(validated)
+        ]
+      );
+      const suggestionsWithNames = validated.map((suggestion) => ({
+        ...suggestion,
+        displayName:
+          candidates.find((candidate) => candidate.userId === suggestion.userId)
+            ?.displayName ?? ""
+      }));
+      return {
+        status: 201,
+        body: {
+          id: result.rows[0]?.id,
+          provider: providerName,
+          suggestions: suggestionsWithNames
+        }
+      };
+    }
+  });
+
+  register({
+    method: "POST",
+    url: "/api/documents/:id/ai-suggestions/:suggestionId/decision",
+    action: "document.ai.decide",
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["decision"],
+        properties: {
+          decision: { type: "string", enum: ["accepted", "rejected", "modified"] }
+        }
+      }
+    },
+    handle: async ({ client, actor, documentId, request }) => {
+      if (!actor || !documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const suggestionId = (request.params as { suggestionId: string }).suggestionId;
+      if (!DOC_ID_PATTERN.test(suggestionId)) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const decision = (request.body as {
+        decision: "accepted" | "rejected" | "modified";
+      }).decision;
+      const updated = await client.query(
+        `UPDATE ai_suggestions
+         SET decision = $3, decided_by = $4, decided_at = now()
+         WHERE id = $1 AND document_id = $2 AND decision IS NULL
+         RETURNING id`,
+        [suggestionId, documentId, decision, actor.id]
+      );
+      return updated.rowCount === 1
+        ? {
+            body: {
+              decided: true,
+              decision,
+              grantCreated: false,
+              nextStep: "Create any approved grant separately."
+            }
+          }
+        : { status: 404, body: DOCUMENT_NOT_FOUND };
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/admin/audit",
+    action: "admin.audit.read",
+    documentId: async () => null,
+    schema: {
+      querystring: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          limit: { type: "string", pattern: "^[0-9]{1,3}$" }
+        }
+      }
+    },
+    handle: async ({ client, actor, request }) => {
+      const requestedLimit = Number(
+        (request.query as { limit?: string }).limit ?? "50"
+      );
+      const limit = Math.min(Math.max(requestedLimit, 1), 100);
+      const result = await client.query(
+        `SELECT a.id::text, a.occurred_at, a.actor_role, u.display_name AS actor_name,
+                a.action, a.outcome, a.reason, a.request_id,
+                CASE WHEN a.document_id IS NOT NULL
+                          AND trustvault_authorize($2::uuid, a.document_id, 'document.read_metadata')
+                     THEN a.document_id::text ELSE NULL END AS document_id,
+                CASE WHEN a.document_id IS NOT NULL
+                          AND trustvault_authorize($2::uuid, a.document_id, 'document.read_metadata')
+                     THEN d.title ELSE NULL END AS document_title
+         FROM audit_log a
+         LEFT JOIN users u ON u.id = a.actor_id
+         LEFT JOIN documents d ON d.id = a.document_id
+         ORDER BY a.id DESC LIMIT $1`,
+        [limit, actor?.id ?? null]
+      );
+      return { body: { events: result.rows } };
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/admin/audit/verify",
+    action: "admin.audit.verify",
+    documentId: async () => null,
+    handle: async ({ client }) => {
+      const verifier = dependencies.auditVerifier ?? verifyAuditChain;
+      const result = await verifier(client, dependencies.config.auditHmacSecret);
+      return { body: result };
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/admin/anomalies",
+    action: "admin.anomalies.read",
+    documentId: async () => null,
+    handle: async ({ client }) => {
+      const denials = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM (
+           SELECT actor_id FROM audit_log
+           WHERE outcome = 'denied' AND occurred_at > now() - interval '1 hour'
+           GROUP BY actor_id HAVING count(*) >= 5
+         ) repeated`
+      );
+      const downloads = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM (
+           SELECT actor_id FROM audit_log
+           WHERE action = 'document.download' AND outcome = 'allowed'
+             AND occurred_at > now() - interval '1 hour'
+           GROUP BY actor_id HAVING count(*) >= 20
+         ) bulk`
+      );
+      const grants = await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM (
+           SELECT actor_id FROM audit_log
+           WHERE action = 'document.grant' AND outcome = 'allowed'
+             AND occurred_at > now() - interval '10 minutes'
+           GROUP BY actor_id HAVING count(*) >= 10
+         ) bursts`
+      );
+      const offHours = await client.query<{ hour: number; count: string }>(
+        `SELECT EXTRACT(HOUR FROM occurred_at AT TIME ZONE 'UTC')::int AS hour,
+                count(*)::text AS count
+         FROM audit_log
+         WHERE action LIKE 'document.%' AND outcome = 'allowed'
+           AND occurred_at > now() - interval '24 hours'
+         GROUP BY hour`
+      );
+      const offHoursCount = countOffHoursAccess(
+        offHours.rows.map((row) => ({ hour: row.hour, count: Number(row.count) }))
+      );
+      const verifier = dependencies.auditVerifier ?? verifyAuditChain;
+      const chain = await verifier(client, dependencies.config.auditHmacSecret);
+      const anomalies = [
+        {
+          type: "repeated_denials",
+          count: Number(denials.rows[0]?.count ?? 0)
+        },
+        {
+          type: "bulk_downloads",
+          count: Number(downloads.rows[0]?.count ?? 0)
+        },
+        {
+          type: "grant_bursts",
+          count: Number(grants.rows[0]?.count ?? 0)
+        },
+        {
+          type: "off_hours_access",
+          count: offHoursCount
+        },
+        {
+          type: "failed_chain_verification",
+          count: chain.valid ? 0 : 1
+        }
+      ].filter((item) => item.count > 0);
+      return { body: { anomalies } };
+    }
+  });
+
+  register({
+    method: "PATCH",
+    url: "/api/folders/:id",
+    action: "folder.manage",
+    documentId: async () => null,
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 200 }
+        }
+      }
+    },
+    handle: async ({ client, actor, request }) => {
+      if (!actor) {
+        return { status: 401, body: LOGIN_FAILURE };
+      }
+      const id = (request.params as { id: string }).id;
+      if (!DOC_ID_PATTERN.test(id)) {
+        return { status: 404, body: { error: "Not found" } };
+      }
+      const name = (request.body as { name: string }).name.trim();
+      if (!name) {
+        return { status: 400, body: { error: "Invalid folder" } };
+      }
+      const result = await client.query(
+        `UPDATE folders SET name = $2, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id::text, name`,
+        [id, name]
+      );
+      return result.rowCount === 1
+        ? { body: result.rows[0] }
+        : { status: 404, body: { error: "Not found" } };
+    }
+  });
+
+  register({
+    method: "DELETE",
+    url: "/api/folders/:id",
+    action: "folder.manage",
+    documentId: async () => null,
+    handle: async ({ client, actor, request }) => {
+      if (!actor) {
+        return { status: 401, body: LOGIN_FAILURE };
+      }
+      const id = (request.params as { id: string }).id;
+      if (!DOC_ID_PATTERN.test(id)) {
+        return { status: 404, body: { error: "Not found" } };
+      }
+      const result = await client.query(
+        `UPDATE folders SET deleted_at = now(), updated_at = now()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id`,
+        [id]
+      );
+      return result.rowCount === 1
+        ? { body: { deleted: true } }
+        : { status: 404, body: { error: "Not found" } };
+    }
+  });
+
+  for (const [url, resultKey] of [
+    ["/api/documents", "documents"],
+    ["/api/search", "results"]
+  ] as const) {
+    register({
+      method: "GET",
+      url,
+      action: "document.search",
+      documentId: async () => null,
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            q: { type: "string", maxLength: 200 },
+            name: { type: "string", maxLength: 200 },
+            owner: { type: "string", maxLength: 200 },
+            category: { type: "string", maxLength: 100 },
+            from: { type: "string", maxLength: 10 },
+            to: { type: "string", maxLength: 10 },
+            includeDeleted: { type: "string", enum: ["true", "false"] }
+          }
+        }
+      },
+      handle: async ({ client, actor, request }) => {
+        if (!actor) {
+          return { status: 401, body: LOGIN_FAILURE };
+        }
+        const filters = request.query as {
+          q?: string;
+          name?: string;
+          owner?: string;
+          category?: string;
+          from?: string;
+          to?: string;
+          includeDeleted?: string;
+        };
+        if (
+          (filters.from && !isCalendarDate(filters.from)) ||
+          (filters.to && !isCalendarDate(filters.to))
+        ) {
+          return { status: 400, body: { error: "Invalid search" } };
+        }
+        const documents = await searchAuthorizedDocuments(
+          client,
+          actor.id,
+          filters
+        );
+        return { body: { [resultKey]: documents } };
+      }
+    });
+  }
 
   register({
     method: "GET",
@@ -651,7 +1109,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
         return { status: 404, body: DOCUMENT_NOT_FOUND };
       }
       const result = await client.query(
-        `SELECT id::text, title, description, declared_mime_type,
+        `SELECT id::text, title, description, category, folder_id::text,
+                declared_mime_type,
                 original_filename, created_at, updated_at
          FROM documents WHERE id = $1 AND deleted_at IS NULL`,
         [documentId]
@@ -671,14 +1130,42 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
         return { status: 404, body: DOCUMENT_NOT_FOUND };
       }
       const result = await client.query(
-        `SELECT g.user_id::text, g.level, g.created_at, g.expires_at
+        `SELECT g.user_id::text, u.display_name, u.email::text,
+                g.level, g.created_at, g.expires_at
          FROM document_grants g
+         JOIN users u ON u.id = g.user_id
          WHERE g.document_id = $1 AND g.revoked_at IS NULL
            AND (g.expires_at IS NULL OR g.expires_at > now())
          ORDER BY g.created_at`,
         [documentId]
       );
       return { body: { grants: result.rows } };
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/documents/:id/grant-targets",
+    action: "document.grant.targets",
+    handle: async ({ client, actor, documentId }) => {
+      if (!actor || !documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const users = await client.query(
+        `SELECT u.id::text, u.display_name, u.email::text, u.role
+         FROM users u
+         WHERE u.is_active = true AND u.id <> $2
+           AND NOT EXISTS (
+             SELECT 1 FROM document_grants g
+             WHERE g.document_id = $1 AND g.user_id = u.id
+               AND g.revoked_at IS NULL
+               AND (g.expires_at IS NULL OR g.expires_at > now())
+           )
+         ORDER BY u.display_name
+         LIMIT 100`,
+        [documentId, actor.id]
+      );
+      return { body: { users: users.rows } };
     }
   });
 
@@ -837,6 +1324,128 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   register({
     method: "POST",
+    url: "/api/documents/:id/versions",
+    action: "document.version.create",
+    handle: async ({ client, actor, documentId, request, trackStorageKey }) => {
+      if (!actor || !documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const part = await request.file();
+      if (!part || part.fieldname !== "file") {
+        return { status: 400, body: { error: "Invalid upload" } };
+      }
+      const bytes = await part.toBuffer();
+      if (part.file.truncated) {
+        return { status: 413, body: { error: "File exceeds upload limit" } };
+      }
+      let upload;
+      try {
+        upload = validateUpload(part.filename, part.mimetype, bytes);
+      } catch {
+        return { status: 400, body: { error: "Invalid upload" } };
+      }
+      if (!dependencies.malwareScanner) {
+        return { status: 503, body: { error: "Uploads temporarily unavailable" } };
+      }
+      const scanResult = await dependencies.malwareScanner(upload);
+      if (scanResult !== "clean") {
+        return { status: 400, body: { error: "Invalid upload" } };
+      }
+      const current = await client.query<{ next_version: number }>(
+        `SELECT COALESCE(max(version_number), 0) + 1 AS next_version
+         FROM document_versions WHERE document_id = $1`,
+        [documentId]
+      );
+      const versionNumber = current.rows[0]?.next_version;
+      if (!versionNumber) {
+        throw new Error("Could not allocate a document version number.");
+      }
+      const encrypted = await encryptAndStore(
+        dependencies.storageDirectory,
+        dependencies.config.masterKey,
+        upload
+      );
+      trackStorageKey(encrypted.storageKey);
+      try {
+        const versionId = await insertVersion(
+          client,
+          actor.id,
+          documentId,
+          encrypted,
+          upload.mimeType,
+          scanResult,
+          versionNumber
+        );
+        await client.query(
+          `UPDATE documents
+           SET current_version_id = $2, original_filename = $3,
+               declared_mime_type = $4, updated_at = now()
+           WHERE id = $1`,
+          [documentId, versionId, upload.filename, upload.mimeType]
+        );
+        return { status: 201, body: { id: versionId, versionNumber } };
+      } catch (error) {
+        await removeStorageQuietly(dependencies.storageDirectory, encrypted.storageKey);
+        trackStorageKey(null);
+        throw error;
+      }
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/documents/:id/versions/:versionId",
+    action: "document.version.read",
+    handle: async ({ client, documentId, request }) => {
+      if (!documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const versionId = (request.params as { versionId: string }).versionId;
+      if (!DOC_ID_PATTERN.test(versionId)) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const result = await client.query(
+        `SELECT id::text, version_number, size_bytes, detected_mime_type, created_at
+         FROM document_versions
+         WHERE document_id = $1 AND id = $2`,
+        [documentId, versionId]
+      );
+      return result.rows[0]
+        ? { body: result.rows[0] }
+        : { status: 404, body: DOCUMENT_NOT_FOUND };
+    }
+  });
+
+  register({
+    method: "GET",
+    url: "/api/documents/:id/versions/:versionId/download",
+    action: "document.download",
+    handle: async ({ client, documentId, request }) => {
+      if (!documentId) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const versionId = (request.params as { versionId: string }).versionId;
+      if (!DOC_ID_PATTERN.test(versionId)) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const file = await loadEncryptedVersion(client, documentId, versionId);
+      if (!file) {
+        return { status: 404, body: DOCUMENT_NOT_FOUND };
+      }
+      const plaintext = await decryptFromStorage(
+        dependencies.storageDirectory,
+        dependencies.config.masterKey,
+        file.encrypted
+      );
+      return {
+        stream: plaintext,
+        headers: safeDownloadHeaders(file.filename, file.mimeType)
+      };
+    }
+  });
+
+  register({
+    method: "POST",
     url: "/api/documents/:id/download-tokens",
     action: "document.download.issue",
     handle: async ({ client, actor, documentId }) => {
@@ -956,32 +1565,6 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   });
 
   register({
-    method: "GET",
-    url: "/api/search",
-    action: "document.search",
-    handle: async ({ client, actor, request }) => {
-      if (!actor) {
-        return { status: 401, body: LOGIN_FAILURE };
-      }
-      const query = (request.query as { q?: string }).q?.trim() ?? "";
-      if (query.length > 200) {
-        return { status: 400, body: { error: "Invalid search" } };
-      }
-      const result = await client.query(
-        `SELECT d.id::text, d.title, d.description, d.created_at
-         FROM documents d
-         WHERE d.deleted_at IS NULL
-           AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')
-           AND ($2 = '' OR d.title ILIKE '%' || $2 || '%' OR d.description ILIKE '%' || $2 || '%')
-         ORDER BY d.created_at DESC
-         LIMIT 50`,
-        [actor.id, query]
-      );
-      return { body: { results: result.rows } };
-    }
-  });
-
-  register({
     method: "PATCH",
     url: "/api/admin/users/:id",
     action: "admin.users.manage",
@@ -1034,6 +1617,66 @@ function resolveParamDocumentId(request: FastifyRequest): string | null {
     return null;
   }
   return DOC_ID_PATTERN.test(params.id) ? params.id : null;
+}
+
+function isCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+async function searchAuthorizedDocuments(
+  client: PoolClient,
+  actorId: string,
+  filters: {
+    q?: string;
+    name?: string;
+    owner?: string;
+    category?: string;
+    from?: string;
+    to?: string;
+    includeDeleted?: string;
+  }
+): Promise<unknown[]> {
+  const result = await client.query(
+    `SELECT d.id::text, d.title, d.description, d.category,
+            d.folder_id::text, d.deleted_at, d.created_at,
+            owner.display_name AS owner_name,
+            trustvault_authorize($1::uuid, d.id, 'document.grants.read') AS can_manage
+     FROM documents d
+     JOIN users owner ON owner.id = d.owner_id
+     JOIN LATERAL (
+       SELECT CASE
+         WHEN d.deleted_at IS NULL THEN
+           trustvault_authorize($1::uuid, d.id, 'document.read_metadata')
+         ELSE
+           $6::boolean AND
+             trustvault_authorize($1::uuid, d.id, 'document.restore')
+       END AS allowed
+     ) permission_filter ON permission_filter.allowed
+     WHERE ($2 = '' OR d.title ILIKE '%' || $2 || '%'
+                       OR d.description ILIKE '%' || $2 || '%')
+       AND ($3 = '' OR d.title ILIKE '%' || $3 || '%')
+       AND ($4 = '' OR owner.display_name ILIKE '%' || $4 || '%')
+       AND ($5 = '' OR d.category ILIKE '%' || $5 || '%')
+       AND ($7::date IS NULL OR d.created_at >= $7::date)
+       AND ($8::date IS NULL OR d.created_at < ($8::date + interval '1 day'))
+     ORDER BY d.created_at DESC
+     LIMIT 100`,
+    [
+      actorId,
+      filters.q?.trim() ?? "",
+      filters.name?.trim() ?? "",
+      filters.owner?.trim() ?? "",
+      filters.category?.trim() ?? "",
+      filters.includeDeleted === "true",
+      filters.from ?? null,
+      filters.to ?? null
+    ]
+  );
+  return result.rows;
 }
 
 async function auditFrameworkFailure(
@@ -1112,17 +1755,19 @@ async function insertVersion(
   documentId: string,
   encrypted: EncryptedFile,
   mimeType: string,
-  scanStatus: "clean" | "rejected"
+  scanStatus: "clean" | "rejected",
+  versionNumber: number
 ): Promise<string> {
   const result = await client.query<{ id: string }>(
     `INSERT INTO document_versions
       (document_id, version_number, storage_key, wrapped_data_key,
        key_wrap_nonce, key_wrap_auth_tag, file_nonce, file_auth_tag,
        sha256, size_bytes, detected_mime_type, created_by, scan_status)
-     VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING id::text`,
     [
       documentId,
+      versionNumber,
       encrypted.storageKey,
       encrypted.wrappedDataKey,
       encrypted.keyWrapNonce,

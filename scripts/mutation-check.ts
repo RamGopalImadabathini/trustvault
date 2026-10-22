@@ -99,18 +99,18 @@ const mutations: Mutation[] = [
     to: "  return;\n\n  await client.query(\n    `INSERT INTO audit_log"
   },
   {
-    name: "Remove document-list SQL grant filter",
+    name: "Remove active-document SQL permission filter",
     file: "src/server/app.ts",
-    from: "AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')",
-    to: "AND true",
-    occurrence: 1
+    from: `WHEN d.deleted_at IS NULL THEN
+           trustvault_authorize($1::uuid, d.id, 'document.read_metadata')`,
+    to: `WHEN d.deleted_at IS NULL THEN
+           true`
   },
   {
-    name: "Remove search SQL grant filter",
+    name: "Remove deleted-document restore permission filter",
     file: "src/server/app.ts",
-    from: "AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')",
-    to: "AND true",
-    occurrence: 2
+    from: `trustvault_authorize($1::uuid, d.id, 'document.restore')`,
+    to: "true"
   }
 ];
 
