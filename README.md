@@ -1,20 +1,20 @@
 # TrustVault
 
-TrustVault is a security-focused document-sharing API. Phases 1–3 and 5 are implemented: PostgreSQL schema and least-privilege roles, server-side sessions, centralized authorization and a startup route registry, and a tamper-evident audit chain. Phase 4 has encrypted storage, upload validation, and authorized downloads, but fails uploads closed until a real malware scanner is wired. The React/Vite client, folders, version creation, audit UI, AI suggestions, external audit anchoring, and deployment to a live host are not implemented.
+TrustVault is a security-focused document-sharing platform. Phases 1–8 are implemented with PostgreSQL schema and least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a minimal React/Vite client. File uploads fail closed unless a real malware scanner is wired into the API composition. Production deployment and external audit anchoring remain operator work.
 
 ## Architecture
 
 - Node.js 20, TypeScript, Fastify, PostgreSQL, React and Vite.
-- The Fastify API authenticates opaque server-side sessions and routes every access through a registered authorization action.
+- The Fastify API authenticates opaque server-side sessions and routes every access through a registered authorization action. The app refuses startup if a route does not declare a known action.
 - PostgreSQL's `trustvault_authorize(actor, document, action)` function is the policy source used by the TypeScript `authorize()` entry point and by permission-filtered SQL list/search queries.
 - The migrations create separate migrator and application roles. The application role has only the DML needed by current routes; it cannot update or delete audit rows.
-- Files are kept in a private storage directory, never served statically. The browser client is only a scaffold; it does not access storage.
+- Files are kept in a private storage directory, never served statically. The React client accesses files only through authenticated API endpoints.
 
 The requested Fastify 4 version was not retained: npm audit identified an authentication-bypass advisory affecting that line with no patched 4.x release available at implementation time. The project uses Fastify 5 instead. This is a deliberate compatibility tradeoff.
 
 ## Authorization model
 
-Folders are organizational metadata only and confer no access. Every document read, list/search result, version list, download, grant operation, and document mutation is checked on the server. Search filters permissions inside the SQL query. An admin may manage user accounts but has no implicit document-content or document-metadata access.
+Folders are organization-wide organizational metadata only and confer no access. Folder management is owner-role restricted; folder visibility never substitutes for a document grant. Every document read, list/search result, version list/download/create, grant operation, and document mutation is checked on the server. Search applies live authorization inside a SQL join before returning rows and has no count/facet endpoints. Name, owner, category, and date filters are applied in that same query. Soft-deleted documents are excluded unless the caller explicitly asks for deleted results and has restore permission. An admin may manage user accounts and view audit activity, but has no implicit document-content or metadata access.
 
 | Role | Document create | Own document | Other document | User administration |
 |---|---|---|---|---|
@@ -48,7 +48,24 @@ Downloads decrypt files of at most 10 MiB into memory before streaming. This bou
 
 Every registered request is audited in the same transaction as its action. Authorization denials, CSRF/schema rejections, unmatched routes, malformed requests, and handler failures are also recorded; inability to write the audit event fails closed. Rows include actor/role, IP, user agent, document, action, outcome, reason, and request ID. `prev_hash` plus HMAC-SHA256 `row_hash` values form a chain. Database triggers reject `UPDATE`, `DELETE`, and `TRUNCATE`; the app role has only `SELECT` and `INSERT` on `audit_log`.
 
-Run `npm run verify-chain` to verify the chain with `AUDIT_HMAC_SECRET`. This protects against alteration by a database-only attacker who lacks the HMAC key. It does **not** protect against a database superuser who also obtains the HMAC key, nor does it provide non-repudiation or external durability. Production should export/anchor chain heads outside the database. No audit-view UI exists yet.
+Run `npm run verify-chain` to verify the chain with `AUDIT_HMAC_SECRET`. Admins can also view recent activity, verify the chain, and see aggregate flags for repeated denials, bulk downloads, grant bursts, off-hours document activity, and failed chain verification. Audit events never expose a document title or identifier to an admin unless that admin separately has document metadata permission. This protects against alteration by a database-only attacker who lacks the HMAC key. It does **not** protect against a database superuser who also obtains the HMAC key, nor does it provide non-repudiation or external durability. Production should export/anchor chain heads outside the database.
+
+## Search, folders, versions, and AI suggestions
+
+`GET /api/documents` and `GET /api/search` accept `q`, `name`, `owner`, `category`, `from`, and `to`; only authorized rows are returned. There are intentionally no totals or facets that could reveal inaccessible documents. Folder listing is organizational and does not imply access; document routes continue to check the document grant. Versions inherit the parent document's live permission: metadata and download are checked through the parent, and creating a version requires edit or manage. Soft-deleted items remain protected and are only discoverable to callers with restore permission.
+
+`POST /api/documents/:id/ai-suggestions` sends document metadata (title, description, category, owner display name), never file content, to an optional injected provider. The default is deterministic and needs no API key. Provider output is schema-checked and restricted to currently active eligible users. Suggestions cannot create grants. The owner records a separate accepted/rejected/modified decision at `/api/documents/:id/ai-suggestions/:suggestionId/decision`; any resulting access change must still be made through the ordinary grant route. Metadata is untrusted input and providers must not treat it as instructions.
+
+The web interface is intentionally minimal: login, accessible document search/list, upload, share/revoke, organizational folders, and admin audit/anomaly views. The Vite development server proxies `/api` to the API to keep browser requests same-origin; production static hosting/serving is not configured by this repository.
+
+## Deliberate omissions and operational limits
+
+- No malware engine is bundled. Integrating an unconfigured or fake scanner would create a success-shaped security gap, so uploads remain unavailable until a real provider is injected.
+- Archives and preview rendering are not supported. This avoids archive extraction/ZIP-bomb exposure and prevents active document content from being rendered inline.
+- Groups do not grant document access; adding group-derived authorization would change revocation and permission semantics.
+- No hosted AI provider, API key, or automatic grant application is configured. Provider use must be explicitly wired, and all suggestions remain owner-reviewed and non-authoritative.
+- There is no external audit anchor or live production deployment in this repository. A database superuser holding the HMAC key can forge a chain; deployers must independently anchor/export audit heads.
+- The UI is a development client, not a hardened production hosting setup. The API's cookies remain `Secure`; do not weaken them to support plain-HTTP production.
 
 ## Revocation and in-flight requests
 
@@ -93,7 +110,7 @@ Use Node.js 20 as specified by `package.json`. PostgreSQL 16 is the Compose targ
    Invoke-RestMethod http://127.0.0.1:3000/healthz
    ```
 
-   `npm run dev:web` starts the Vite development server separately. To run the Compose stack, use `docker compose --profile local up -d --build`; run the demo seed service with `docker compose --profile local run --rm seed`.
+   `npm run dev:web` starts the Vite development server separately at `http://localhost:5173`; it proxies `/api` to `http://127.0.0.1:3000` by default. Set `TRUSTVAULT_API_TARGET` if the API is at another origin. To run the Compose stack, use `docker compose --profile local up -d --build`; run the demo seed service with `docker compose --profile local run --rm seed`.
 
 The seed command creates one admin, two owners, and three viewers. All six use the **demo-only** password `TrustVault-Local-Demo-2026!`:
 
@@ -205,16 +222,17 @@ Last run: 11 mutations; all were killed by at least one failing test. The mutati
 | Disable audit TRUNCATE protection | KILLED | `phase 1 security foundation blocks update/delete/truncate mutations on audit_log` |
 | Accept undersized secrets | KILLED | `loadConfig measures secrets in UTF-8 bytes`; `loadConfig does not include secret values in configuration errors` |
 | Accept non-PostgreSQL database URLs | KILLED | `loadConfig rejects unsupported or malformed database URLs` (three invalid URL cases) |
-| Bypass document `authorize()` call site | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation` |
+| Bypass document `authorize()` call site | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation`; `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
 | Bypass framework failure `authorize()` call site | KILLED | `PostgreSQL authorization and revocation integration audits unmatched routes and malformed requests` |
 | Disable route-registry authorization guard | KILLED | `route authorization registry refuses to start with a missing or unknown route action` |
 | Disable `audit_log` insert | KILLED | `health endpoint fails closed when the audit write cannot be persisted`; `audit chain serializes append and writes denied events with chained hashes`; integration test `enforces cross-user access, download, audit, and immediate revocation` |
-| Remove document-list SQL grant filter | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation` |
-| Remove search SQL grant filter | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation` |
+| Remove active-document SQL permission filter | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation`; `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
+| Remove deleted-document restore permission filter | KILLED | `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
 
-## Deliberately not built yet
+## Deliberate omissions
 
-- Folder inheritance, groups, and bulk sharing: folders are organizational only; adding inheritance would expand the authorization surface.
-- Document-version creation, previews, exports, admin audit UI, and AI suggestions: these need independent authorization/audit tests and are outside phases 1–5.
-- A malware-scanning engine: no scanner is silently treated as successful; uploads fail closed until a provider is connected.
-- External audit anchoring and a live production deployment: a database superuser with the HMAC key remains able to forge the chain, so production needs an external anchor.
+- Folder inheritance and group-derived grants: folders and groups are organizational only; adding indirect authorization would expand the permission and revocation surface.
+- Preview rendering, archive extraction, and export endpoints: files are downloaded only as attachments; archives are rejected to avoid ZIP-bomb/extraction exposure.
+- A bundled malware-scanning engine or hosted AI provider: no scanner/provider is silently assumed available; uploads fail closed, and AI uses the deterministic fallback unless explicitly configured.
+- External audit anchoring and a live production deployment: a database superuser with the HMAC key remains able to forge the chain, so production needs an independent anchor and deployment review.
+- A production frontend hosting configuration: Vite serves the client only for local development; production must separately host the built client and preserve same-origin secure-cookie/CSRF behavior.
