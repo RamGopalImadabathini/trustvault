@@ -3,6 +3,14 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    proxy: {
+      "/api": {
+        target: process.env.TRUSTVAULT_API_TARGET ?? "http://127.0.0.1:3000",
+        changeOrigin: false
+      }
+    }
+  },
   build: {
     outDir: "dist/client",
     emptyOutDir: false
