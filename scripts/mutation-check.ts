@@ -9,6 +9,7 @@ interface Mutation {
   file: string;
   from: string;
   to: string;
+  occurrence?: number;
 }
 
 interface MutationResult {
@@ -72,6 +73,44 @@ const mutations: Mutation[] = [
     to: `function isPostgresUrl(_value: string): boolean {
   return true;
 }`
+  },
+  {
+    name: "Bypass document authorize() call site",
+    file: "src/server/app.ts",
+    from: "const allowed = await authorize(client, actor, documentId, action);",
+    to: "const allowed = true;"
+  },
+  {
+    name: "Bypass framework failure authorize() call site",
+    file: "src/server/app.ts",
+    from: "const allowed = await authorize(client, actor, null, action);",
+    to: "const allowed = true;"
+  },
+  {
+    name: "Disable route-registry authorization guard",
+    file: "src/server/authorization.ts",
+    from: "if (missing.length > 0) {",
+    to: "if (false) {"
+  },
+  {
+    name: "Disable audit_log insert",
+    file: "src/server/audit.ts",
+    from: "  await client.query(\n    `INSERT INTO audit_log",
+    to: "  return;\n\n  await client.query(\n    `INSERT INTO audit_log"
+  },
+  {
+    name: "Remove document-list SQL grant filter",
+    file: "src/server/app.ts",
+    from: "AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')",
+    to: "AND true",
+    occurrence: 1
+  },
+  {
+    name: "Remove search SQL grant filter",
+    file: "src/server/app.ts",
+    from: "AND trustvault_authorize($1::uuid, d.id, 'document.read_metadata')",
+    to: "AND true",
+    occurrence: 2
   }
 ];
 
@@ -82,11 +121,10 @@ async function run(): Promise<void> {
     results.push(await runMutation(mutation));
   }
 
-  const deferred = await findDeferredTargets();
-  printResults(results, deferred);
+  printResults(results);
 
   const survivors = results.filter((result) => result.result !== "KILLED");
-  if (survivors.length > 0 || deferred.length > 0) {
+  if (survivors.length > 0) {
     process.exitCode = 1;
   }
 }
@@ -96,13 +134,23 @@ async function runMutation(mutation: Mutation): Promise<MutationResult> {
   const original = await readFile(filePath, "utf8");
   const from = mutation.from.replace(/\n/g, os.EOL);
   const to = mutation.to.replace(/\n/g, os.EOL);
-  const firstIndex = original.indexOf(from);
-
-  if (firstIndex < 0 || original.indexOf(from, firstIndex + 1) >= 0) {
+  const occurrence = mutation.occurrence ?? 1;
+  let firstIndex = -1;
+  let searchFrom = 0;
+  for (let current = 0; current < occurrence; current += 1) {
+    firstIndex = original.indexOf(from, searchFrom);
+    if (firstIndex < 0) {
+      break;
+    }
+    searchFrom = firstIndex + from.length;
+  }
+  if (firstIndex < 0) {
     return {
       mutation: mutation.name,
       result: "ERROR",
-      failingTests: [`Expected exactly one mutation anchor in ${mutation.file}`]
+      failingTests: [
+        `Expected occurrence ${occurrence} of mutation anchor in ${mutation.file}`
+      ]
     };
   }
 
@@ -128,7 +176,8 @@ async function runMutation(mutation: Mutation): Promise<MutationResult> {
       {
         cwd: projectRoot,
         encoding: "utf8",
-        windowsHide: true
+        windowsHide: true,
+        timeout: 120_000
       }
     );
 
@@ -191,68 +240,7 @@ async function runMutation(mutation: Mutation): Promise<MutationResult> {
   }
 }
 
-async function findDeferredTargets(): Promise<string[]> {
-  const scanRoots = ["src/server", "src/client", "db"];
-  const sourceFiles = await collectSourceFiles(scanRoots);
-  const sourceContent = await Promise.all(
-    sourceFiles.map((file) => readFile(file, "utf8"))
-  );
-  const allSource = sourceContent.join("\n");
-  const authorizeCalls = allSource.match(/\bauthorize\s*\(/g)?.length ?? 0;
-  const hasRouteRegistry = /route.?registry|registry.?guard/i.test(allSource);
-  const hasAuditWrite =
-    /audit(?:Log|_log)?\s*\.(?:insert|write|append)|writeAudit|appendAudit/i.test(
-      allSource
-    );
-  const hasSearchGrantFilter = sourceContent.some(
-    (content) =>
-      /\bsearch\b/i.test(content) &&
-      /document_grants|documentGrants|grants?\.user_id/i.test(content)
-  );
-
-  return [
-    authorizeCalls === 0
-      ? "Every authorize() call site (no call sites exist in Phase 1)"
-      : `Every authorize() call site (${authorizeCalls} found; mutation adapter not implemented)`,
-    hasRouteRegistry
-      ? "Route-registry authorization guard (mutation adapter not implemented)"
-      : "Route-registry authorization guard (not implemented in Phase 1)",
-    hasAuditWrite
-      ? "Audit write call (mutation adapter not implemented)"
-      : "Audit write call (not implemented in Phase 1)",
-    hasSearchGrantFilter
-      ? "Search grant filter (mutation adapter not implemented)"
-      : "Search grant filter (not implemented in Phase 1)"
-  ];
-}
-
-async function collectSourceFiles(relativeRoots: string[]): Promise<string[]> {
-  const files: string[] = [];
-
-  for (const relativeRoot of relativeRoots) {
-    const absoluteRoot = path.join(projectRoot, relativeRoot);
-    await visit(absoluteRoot);
-  }
-  return files;
-
-  async function visit(directory: string): Promise<void> {
-    const { readdir, stat } = await import("node:fs/promises");
-    const entries = await readdir(directory);
-
-    for (const entry of entries) {
-      const entryPath = path.join(directory, entry);
-      const entryStat = await stat(entryPath);
-
-      if (entryStat.isDirectory()) {
-        await visit(entryPath);
-      } else if (/\.(?:ts|tsx|js|jsx|sql)$/.test(entry)) {
-        files.push(entryPath);
-      }
-    }
-  }
-}
-
-function printResults(results: MutationResult[], deferred: string[]): void {
+function printResults(results: MutationResult[]): void {
   console.log("| Mutation | Result | Failing test(s) |");
   console.log("|---|---|---|");
 
@@ -264,15 +252,6 @@ function printResults(results: MutationResult[], deferred: string[]): void {
     console.log(`| ${result.mutation} | ${result.result} | ${tests} |`);
   }
 
-  for (const target of deferred) {
-    console.log(`| ${target} | NOT TESTED | No applicable mutation result |`);
-  }
-
-  if (deferred.length > 0) {
-    console.error(
-      `Mutation coverage incomplete: ${deferred.join(", ")}. Add mutation adapters and regression tests before treating authorization mutation testing as complete.`
-    );
-  }
 }
 
 void run().catch((error: unknown) => {
