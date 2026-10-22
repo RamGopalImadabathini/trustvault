@@ -75,16 +75,16 @@ Every request reads the current session and grant state; there is no cross-reque
 
 | Name | Required | Purpose |
 |---|---|---|
-| `DATABASE_URL` | Yes for API | Application-role PostgreSQL connection |
-| `DB_MIGRATION_URL` | Yes for migrations | Migrator-role connection |
+| `DATABASE_URL` | Yes | Application-role PostgreSQL connection |
+| `DB_MIGRATION_URL` | Yes for the Docker startup migration | Restricted migrator-role connection; do not reuse the app role |
 | `MASTER_KEY` | Yes | Wraps per-file data keys |
 | `AUDIT_HMAC_SECRET` | Yes | HMAC key for audit-chain rows |
 | `SESSION_SECRET` | Yes | Signs CSRF tokens |
-| `POSTGRES_MIGRATOR_PASSWORD` | Docker Compose | PostgreSQL migrator role password |
-| `POSTGRES_APP_PASSWORD` | Docker Compose | PostgreSQL application role password |
 | `PORT` | No; default `3000` | API listen port |
-| `STORAGE_DIRECTORY` | No; default `storage` | Private encrypted-file directory |
-| `NODE_ENV` | No | Runtime mode; demo seeding refuses production by default |
+| `STORAGE_DIRECTORY` | No; default `storage` | Private encrypted-file directory; use persistent private storage |
+| `NODE_ENV` | No; Docker sets `production` | Runtime mode; demo seeding refuses production by default |
+| `POSTGRES_MIGRATOR_PASSWORD` | Docker Compose only | PostgreSQL migrator role password |
+| `POSTGRES_APP_PASSWORD` | Docker Compose only | PostgreSQL application role password |
 | `ALLOW_DEMO_SEED` | No | Must be `true` to override the production seed refusal; do not use in production |
 
 `MASTER_KEY`, `AUDIT_HMAC_SECRET`, and `SESSION_SECRET` must each be at least 32 UTF-8 bytes. Startup validates all required API variables together and prints invalid variable names, never values. Keep `.env` out of Git and use distinct randomly generated values for every environment.
@@ -111,6 +111,23 @@ Use Node.js 20 as specified by `package.json`. PostgreSQL 16 is the Compose targ
    ```
 
    `npm run dev:web` starts the Vite development server separately at `http://localhost:5173`; it proxies `/api` to `http://127.0.0.1:3000` by default. Set `TRUSTVAULT_API_TARGET` if the API is at another origin. To run the Compose stack, use `docker compose --profile local up -d --build`; run the demo seed service with `docker compose --profile local run --rm seed`.
+
+## Deployment
+
+Build and run the runtime image with Docker or a compatible container platform. The image contains no `.env` file, credentials, or secret build arguments. At each container start it runs `npm run db:migrate` using `DB_MIGRATION_URL` before starting the API. The migrations are idempotently tracked in `schema_migrations`; the API connection remains the separate `DATABASE_URL` app role. Configure a persistent private volume for `STORAGE_DIRECTORY`, restrict access to it, and put the API behind HTTPS/TLS termination before production use. The API reads `PORT` from the environment (default `3000`). Compose runs a one-shot migration service before the API as an additional dependency; the API startup migration is a final consistency check.
+
+Required host variable names: `DATABASE_URL`, `DB_MIGRATION_URL`, `MASTER_KEY`, `AUDIT_HMAC_SECRET`, `SESSION_SECRET`. Also set `PORT` when the host does not use 3000 and `STORAGE_DIRECTORY` when persistent storage is mounted elsewhere. For the provided Compose database, additionally configure `POSTGRES_MIGRATOR_PASSWORD` and `POSTGRES_APP_PASSWORD`. Supply values through the host's secret manager; do not place them in Dockerfile instructions, image layers, source control, or deployment logs. Use unique independent 32-byte-minimum secrets and separate database roles.
+
+The repository does not configure a malware scanner. Consequently, the deployed API fails closed on upload until `malwareScanner` is wired into the server composition. The smoke script can test a pre-seeded document without upload, or test an actual upload when `TRUSTVAULT_SMOKE_FILE` is provided after a real scanner is integrated.
+
+To smoke-test an HTTPS deployment, set the smoke-only environment values `TRUSTVAULT_BASE_URL`, `TRUSTVAULT_OWNER_EMAIL`, `TRUSTVAULT_OWNER_PASSWORD`, `TRUSTVAULT_VIEWER_EMAIL`, `TRUSTVAULT_VIEWER_PASSWORD`, `TRUSTVAULT_ADMIN_EMAIL`, and `TRUSTVAULT_ADMIN_PASSWORD`, then run:
+
+```powershell
+npm ci
+npm run smoke-test
+```
+
+The script discovers the owner's first accessible document if `TRUSTVAULT_DOCUMENT_ID` is omitted. To include an upload, also set `TRUSTVAULT_SMOKE_FILE` to a valid PDF after a real scanner provider has been integrated. Smoke-test credentials are script inputs, not application host settings; keep them out of logs and remove them after use.
 
 The seed command creates one admin, two owners, and three viewers. All six use the **demo-only** password `TrustVault-Local-Demo-2026!`:
 
@@ -143,9 +160,9 @@ $ownerMePath = Join-Path $temp "owner-me.json"
 curl.exe -sS -o $ownerMePath "$base/api/auth/me" -H "Cookie: $ownerCookie"
 $ownerMe = Get-Content -Raw $ownerMePath | ConvertFrom-Json
 $ownerDocsPath = Join-Path $temp "owner-docs.json"
-curl.exe -sS -o $ownerDocsPath "$base/api/documents?q=Demo%20document%3A%20owner%20one" `
+curl.exe -sS -o $ownerDocsPath "$base/api/search?q=Demo%20document%3A%20owner%20one" `
   -H "Cookie: $ownerCookie"
-$documentId = (Get-Content -Raw $ownerDocsPath | ConvertFrom-Json).documents[0].id
+$documentId = (Get-Content -Raw $ownerDocsPath | ConvertFrom-Json).results[0].id
 
 $viewerLogin = Invoke-WebRequest -Method Post -Uri "$base/api/auth/login" `
   -ContentType "application/json" `
@@ -213,7 +230,7 @@ The PostgreSQL integration suite runs when `DATABASE_URL` is configured and `TRU
 
 ### Mutation-check results
 
-Last run: 11 mutations; all were killed by at least one failing test. The mutation runner restores each file in a `finally` block and exits nonzero for any survivor, adapter error, or test-run error.
+Last run: 11 mutations; all were killed by at least one failing test. Each mutation runs the complete test suite. The runner restores each file in a `finally` block and exits nonzero for any survivor, adapter error, or test-run error.
 
 | Mutation | Result | Failing test(s) |
 |---|---|---|
@@ -222,12 +239,12 @@ Last run: 11 mutations; all were killed by at least one failing test. The mutati
 | Disable audit TRUNCATE protection | KILLED | `phase 1 security foundation blocks update/delete/truncate mutations on audit_log` |
 | Accept undersized secrets | KILLED | `loadConfig measures secrets in UTF-8 bytes`; `loadConfig does not include secret values in configuration errors` |
 | Accept non-PostgreSQL database URLs | KILLED | `loadConfig rejects unsupported or malformed database URLs` (three invalid URL cases) |
-| Bypass document `authorize()` call site | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation`; `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
-| Bypass framework failure `authorize()` call site | KILLED | `PostgreSQL authorization and revocation integration audits unmatched routes and malformed requests` |
+| Bypass document `authorize()` call site | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `revokes sessions after a role change or deactivation` |
+| Bypass framework failure `authorize()` call site | KILLED | `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `audits unmatched routes and malformed requests` |
 | Disable route-registry authorization guard | KILLED | `route authorization registry refuses to start with a missing or unknown route action` |
 | Disable `audit_log` insert | KILLED | `health endpoint fails closed when the audit write cannot be persisted`; `audit chain serializes append and writes denied events with chained hashes`; integration test `enforces cross-user access, download, audit, and immediate revocation` |
-| Remove active-document SQL permission filter | KILLED | `PostgreSQL authorization and revocation integration enforces cross-user access, download, audit, and immediate revocation`; `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
-| Remove deleted-document restore permission filter | KILLED | `PostgreSQL authorization and revocation integration keeps search, folders, versions, AI decisions, and admin metadata scoped` |
+| Remove active-document SQL permission filter | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route` |
+| Remove deleted-document restore permission filter | KILLED | `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `revokes sessions after a role change or deactivation` |
 
 ## Deliberate omissions
 
