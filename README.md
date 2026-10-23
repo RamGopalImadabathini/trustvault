@@ -1,6 +1,6 @@
 # TrustVault
 
-TrustVault is a security-focused document-sharing platform. Phases 1–8 are implemented with PostgreSQL schema and least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a minimal React/Vite client. Uploads fail closed unless a malware scanner is explicitly configured. Production deployment and external audit anchoring remain operator work.
+TrustVault is a security-focused document-sharing platform with PostgreSQL least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a React/Vite client. Uploads fail closed unless a malware scanner is explicitly configured. The included EC2 setup is a demonstration deployment; it does not replace a production ingress, malware scanner, or independent audit anchor.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ Folders are organization-wide organizational metadata only and confer no access.
 | `owner` | Yes | Implicit `manage` | Only if explicitly granted | No |
 | `viewer` | No | Only if explicitly granted | Only if explicitly granted | No |
 
-| Grant level | Read metadata, list, download | Edit metadata | Grant/revoke, delete, restore |
+| Grant level | Read metadata, list, download | Rename/category/version | Grant/revoke, delete, restore |
 |---|---:|---:|---:|
 | `read` | Yes | No | No |
 | `edit` | Yes | Yes | No |
@@ -56,16 +56,19 @@ Run `npm run verify-chain` to verify the chain with `AUDIT_HMAC_SECRET`. Admins 
 
 `POST /api/documents/:id/ai-suggestions` sends document metadata (title, description, category, owner display name), never file content, to an optional injected provider. The default is deterministic and needs no API key. Provider output is schema-checked and restricted to currently active eligible users. Suggestions cannot create grants. The owner records a separate accepted/rejected/modified decision at `/api/documents/:id/ai-suggestions/:suggestionId/decision`; any resulting access change must still be made through the ordinary grant route. Metadata is untrusted input and providers must not treat it as instructions.
 
-The web interface is intentionally minimal: login, accessible document search/list, upload, share/revoke, organizational folders, and admin audit/anomaly views. The Vite development server proxies `/api` to the API to keep browser requests same-origin; production static hosting/serving is not configured by this repository.
+The web interface provides authorized search/filtering, upload, metadata/version editing, soft delete/restore for managers, share/revoke, organizational folders, and admin audit/anomaly views. The Vite development server proxies `/api` to the API locally; production serves the built UI from the API process.
 
-## Deliberate omissions and operational limits
+## What I chose not to build, and why
 
 - No production-grade malware engine is bundled. `local-basic` is a demo-grade heuristic only; with no recognized scanner, uploads remain unavailable rather than being accepted.
 - Archives and preview rendering are not supported. This avoids archive extraction/ZIP-bomb exposure and prevents active document content from being rendered inline.
 - Groups do not grant document access; adding group-derived authorization would change revocation and permission semantics.
 - No hosted AI provider, API key, or automatic grant application is configured. Provider use must be explicitly wired, and all suggestions remain owner-reviewed and non-authoritative.
-- There is no external audit anchor or live production deployment in this repository. A database superuser holding the HMAC key can forge a chain; deployers must independently anchor/export audit heads.
-- The UI is a development client, not a hardened production hosting setup. The API's cookies remain `Secure`; do not weaken them to support plain-HTTP production.
+- There is no external audit anchor. A database superuser holding the HMAC key can forge a chain; production operators must independently anchor/export audit heads.
+- The EC2 convenience deployment uses a public Cloudflare quick tunnel whose URL changes on restart. It has no edge authentication or stable hostname and is not production ingress. For production, use managed TLS ingress and access controls.
+- Demo account names and the local default password are public. Production seeding requires an explicit `SEED_DEMO_PASSWORD`; change or disable demo accounts before storing sensitive documents.
+- There is no built-in ClamAV/hosted scanner integration. `local-basic` is demonstrative and must not be relied on for production malware detection.
+- The API session cookie remains `Secure`; do not weaken it to support plain-HTTP production. Put production traffic behind HTTPS.
 
 ## Revocation and in-flight requests
 
@@ -83,14 +86,14 @@ Every request reads the current session and grant state; there is no cross-reque
 | `PORT` | No; default `3000` | API listen port |
 | `STORAGE_DIRECTORY` | No; default `storage` | Private encrypted-file directory; use persistent private storage |
 | `MALWARE_SCANNER` | No; unset or unknown rejects uploads | Set to `local-basic` for demo-grade scanning; use ClamAV for production |
-| `NODE_ENV` | No; Docker sets `production` | Runtime mode; demo seeding refuses production by default |
+| `NODE_ENV` | No; Docker sets `production` | Runtime mode; production seeding requires `SEED_DEMO_PASSWORD` |
 | `POSTGRES_MIGRATOR_PASSWORD` | Docker Compose only | PostgreSQL migrator role password |
 | `POSTGRES_APP_PASSWORD` | Docker Compose only | PostgreSQL application role password |
-| `ALLOW_DEMO_SEED` | No | Must be `true` to override the production seed refusal; do not use in production |
+| `SEED_DEMO_PASSWORD` | Required only for production seed | Password hashed for the seeded demo users; local seed defaults to the public demo password if unset |
 
 `MASTER_KEY`, `AUDIT_HMAC_SECRET`, and `SESSION_SECRET` must each be at least 32 UTF-8 bytes. Startup validates all required API variables together and prints invalid variable names, never values. Keep `.env` out of Git and use distinct randomly generated values for every environment.
 
-`MALWARE_SCANNER` supports only the explicit `local-basic` provider in this build. Leaving it unset or setting an unknown provider keeps uploads fail-closed, including in production. The demo scanner checks a short list of raw byte/text markers and is not a substitute for ClamAV; integrating a production provider requires wiring its scanner callback.
+`MALWARE_SCANNER` supports only the explicit `local-basic` provider in this build. Leaving it unset or setting an unknown provider keeps uploads fail-closed, including in production. The demo scanner checks a short list of raw byte/text markers and is not a substitute for ClamAV; integrating a production provider requires wiring its scanner callback. `SEED_DEMO_PASSWORD` has no production fallback: set a unique password before running `NODE_ENV=production npm run seed`. Never use the local demo password for a public deployment.
 
 ## Local development on Windows
 
@@ -136,7 +139,7 @@ bash deploy/ec2/setup.sh
 bash deploy/ec2/show-link.sh
 ```
 
-The setup installs Node 20 with nvm, Docker and its Compose CLI plugin, generates a private `.env` only when one does not already exist, starts PostgreSQL, builds the application, migrates and seeds the database, then enables the app and tunnel systemd services. The generated `.env` is never printed or replaced by setup. The database and application data persist in Docker volumes and the repository's private `storage/` directory.
+The setup installs Node 20 with nvm, Docker and its Compose CLI plugin, prompts without echo for a 12+ character URL-safe production seed password, generates a private `.env` only when one does not already exist, starts PostgreSQL, builds the application, migrates and seeds the database, then enables the app and tunnel systemd services. The generated `.env` is never printed or replaced by setup. If an existing `.env` has no `SEED_DEMO_PASSWORD`, add it securely before rerunning setup; setup never overwrites that file. The database and application data persist in Docker volumes and the repository's private `storage/` directory.
 
 To update an existing checkout:
 
@@ -152,9 +155,9 @@ bash deploy/ec2/show-link.sh
 
 The quick-tunnel URL is **public and unauthenticated at the network edge**: anyone who obtains the link can reach the app's public login and health endpoints, though protected application routes still require app authorization. The free quick-tunnel link changes whenever the tunnel process restarts; rerun `show-link.sh` to retrieve the latest link. This is a demo/convenience deployment, not a stable production ingress.
 
-Seeded demo accounts use the public password `TrustVault-Local-Demo-2026!`; change or remove them before exposing sensitive data. `local-basic` is a demo-grade heuristic scanner, not production malware protection. Production uploads require ClamAV or another hosted/production-grade scanner integration; otherwise uploads remain disabled.
+The local seed defaults to the public demo password `TrustVault-Local-Demo-2026!`. Production seed requires `SEED_DEMO_PASSWORD` and never falls back to that value. For EC2 setup, enter a unique URL-safe password when prompted; setup stores it in the private `.env` without echoing it. Change or remove seeded demo accounts before exposing sensitive data. `local-basic` is a demo-grade heuristic scanner, not production malware protection. Production uploads require ClamAV or another hosted/production-grade scanner integration; otherwise uploads remain disabled.
 
-The seed command creates one admin, two owners, and three viewers. All six use the **demo-only** password `TrustVault-Local-Demo-2026!`:
+The seed command creates one admin, two owners, and three viewers. In local development, all six use the **demo-only** default password `TrustVault-Local-Demo-2026!` unless `SEED_DEMO_PASSWORD` is set:
 
 | Role | Email |
 |---|---|
@@ -165,7 +168,7 @@ The seed command creates one admin, two owners, and three viewers. All six use t
 | viewer | `viewer.two@trustvault.local` |
 | viewer | `viewer.three@trustvault.local` |
 
-The demo password is public and must never be used outside a local demonstration. Demo seed is refused when `NODE_ENV=production` unless explicitly overridden.
+The local demo password is public and must never be used outside a local demonstration. Production seeding refuses to run unless `SEED_DEMO_PASSWORD` is configured.
 
 ### PowerShell API walkthrough
 
@@ -245,7 +248,7 @@ Run the complete checks:
 npm run typecheck
 npm run lint
 npm test
-npm run build
+npm run build:all
 npm audit
 npm run mutation-check
 npm run verify-chain
@@ -272,10 +275,9 @@ Last run: 12 mutations; all were killed by at least one failing test. Each mutat
 | Remove active-document SQL permission filter | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route` |
 | Remove deleted-document restore permission filter | KILLED | `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `revokes sessions after a role change or deactivation` |
 
-## Deliberate omissions
+## Additional unbuilt features
 
 - Folder inheritance and group-derived grants: folders and groups are organizational only; adding indirect authorization would expand the permission and revocation surface.
 - Preview rendering, archive extraction, and export endpoints: files are downloaded only as attachments; archives are rejected to avoid ZIP-bomb/extraction exposure.
 - A production malware-scanning engine or hosted AI provider: `local-basic` is demo-grade only; uploads fail closed unless a provider is explicitly selected, and AI uses the deterministic fallback unless explicitly configured.
-- External audit anchoring and a live production deployment: a database superuser with the HMAC key remains able to forge the chain, so production needs an independent anchor and deployment review.
-- A production frontend hosting configuration: Vite serves the client only for local development; production must separately host the built client and preserve same-origin secure-cookie/CSRF behavior.
+- External audit anchoring: a database superuser with the HMAC key remains able to forge the chain, so production needs an independent anchor and deployment review.
