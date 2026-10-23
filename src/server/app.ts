@@ -13,6 +13,7 @@ import type {
   RouteOptions
 } from "fastify";
 import Fastify from "fastify";
+import { resolveBuildFilePath, serveClientFile } from "./static-files.js";
 import type { Pool, PoolClient } from "pg";
 import { appendAudit, verifyAuditChain } from "./audit.js";
 import { countOffHoursAccess } from "./anomalies.js";
@@ -50,6 +51,7 @@ export interface AppDependencies {
   pool: Pool;
   config: AppConfig;
   storageDirectory: string;
+  clientBuildDirectory?: string;
   malwareScanner?: (upload: ReturnType<typeof validateUpload>) => Promise<"clean" | "rejected">;
   aiSuggestionProvider?: AiSuggestionProvider;
   auditVerifier?: typeof verifyAuditChain;
@@ -390,6 +392,33 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   };
 
   app.setNotFoundHandler(async (request, reply) => {
+    const pathname = request.url.split("?")[0] ?? request.url;
+    if (
+      dependencies.clientBuildDirectory &&
+      (request.method === "GET" || request.method === "HEAD") &&
+      pathname !== "/api" &&
+      !pathname.startsWith("/api/")
+    ) {
+      const served = await serveClientFile(
+        dependencies.clientBuildDirectory,
+        pathname,
+        reply
+      );
+      if (served) {
+        return reply;
+      }
+      if (resolveBuildFilePath(dependencies.clientBuildDirectory, pathname)) {
+        const fallbackServed = await serveClientFile(
+          dependencies.clientBuildDirectory,
+          "/",
+          reply
+        );
+        if (fallbackServed) {
+          return reply;
+        }
+      }
+    }
+
     try {
       await auditFrameworkFailure(
         dependencies,

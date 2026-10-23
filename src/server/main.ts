@@ -28,6 +28,7 @@ async function main(): Promise<void> {
       pool,
       config,
       storageDirectory: path.resolve(process.env.STORAGE_DIRECTORY ?? "storage"),
+      clientBuildDirectory: path.resolve("dist/client"),
       malwareScanner
     });
     await app.listen({ host: "0.0.0.0", port });

@@ -12,6 +12,7 @@
     "start:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local.ps1",
     "build": "npm run typecheck && npm run build:server && vite build",
     "build:server": "tsc --project tsconfig.server.json",
+    "build:all": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -20,7 +21,8 @@
     "seed": "tsx scripts/seed.ts",
     "smoke-test": "tsx scripts/smoke-test.ts",
     "verify-chain": "tsx scripts/verify-chain.ts",
-    "start": "node dist/server/main.js"
+    "start": "node dist/server/main.js",
+    "start:prod": "node -e \"process.env.NODE_ENV='production'; import('./dist/server/main.js')\""
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
