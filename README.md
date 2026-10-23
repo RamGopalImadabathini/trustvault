@@ -124,6 +124,36 @@ npm run smoke-test
 
 The script discovers the owner's first accessible document if `TRUSTVAULT_DOCUMENT_ID` is omitted. To include an upload, also set `TRUSTVAULT_SMOKE_FILE` to a valid PDF after a production-grade scanner provider has been integrated. Smoke-test credentials are script inputs, not application host settings; keep them out of logs and remove them after use.
 
+## Deploy on EC2 (Amazon Linux 2023)
+
+This single-process setup serves the built React application and API from port 3000. From an Amazon Linux 2023 EC2 instance, allow **SSH from your IP only** in the security group; do not open any other inbound ports. The app is reachable through a Cloudflare quick tunnel, not a directly exposed EC2 port.
+
+```bash
+cd ~
+git clone https://github.com/RamGopalImadabathini/trustvault.git
+cd ~/trustvault
+bash deploy/ec2/setup.sh
+bash deploy/ec2/show-link.sh
+```
+
+The setup installs Node 20 with nvm, Docker and its Compose CLI plugin, generates a private `.env` only when one does not already exist, starts PostgreSQL, builds the application, migrates and seeds the database, then enables the app and tunnel systemd services. The generated `.env` is never printed or replaced by setup. The database and application data persist in Docker volumes and the repository's private `storage/` directory.
+
+To update an existing checkout:
+
+```bash
+cd ~/trustvault
+git pull origin main
+npm ci
+npm run build:all
+npm run db:migrate
+sudo systemctl restart trustvault
+bash deploy/ec2/show-link.sh
+```
+
+The quick-tunnel URL is **public and unauthenticated at the network edge**: anyone who obtains the link can reach the app's public login and health endpoints, though protected application routes still require app authorization. The free quick-tunnel link changes whenever the tunnel process restarts; rerun `show-link.sh` to retrieve the latest link. This is a demo/convenience deployment, not a stable production ingress.
+
+Seeded demo accounts use the public password `TrustVault-Local-Demo-2026!`; change or remove them before exposing sensitive data. `local-basic` is a demo-grade heuristic scanner, not production malware protection. Production uploads require ClamAV or another hosted/production-grade scanner integration; otherwise uploads remain disabled.
+
 The seed command creates one admin, two owners, and three viewers. All six use the **demo-only** password `TrustVault-Local-Demo-2026!`:
 
 | Role | Email |
