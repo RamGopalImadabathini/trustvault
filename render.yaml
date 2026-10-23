@@ -27,9 +27,8 @@ services:
         generateValue: true
       - key: NODE_ENV
         value: production
-
   # Frontend UI Static Site
-  - type: static
+  - type: web
     name: trustvault-ui
     env: static
     buildCommand: npm ci && npm run build
@@ -40,7 +39,6 @@ services:
           type: web
           name: trustvault-api
           property: url
-
 databases:
   - name: trustvault-db
     databaseName: trustvault
