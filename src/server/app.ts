@@ -1209,7 +1209,8 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
         minProperties: 1,
         properties: {
           title: { type: "string", minLength: 1, maxLength: 500 },
-          description: { type: "string", maxLength: 10000 }
+          description: { type: "string", maxLength: 10000 },
+          category: { type: ["string", "null"], maxLength: 100 }
         }
       }
     },
@@ -1217,15 +1218,27 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
       if (!documentId) {
         return { status: 404, body: DOCUMENT_NOT_FOUND };
       }
-      const body = request.body as { title?: string; description?: string };
+      const body = request.body as {
+        title?: string;
+        description?: string;
+        category?: string | null;
+      };
       const result = await client.query(
         `UPDATE documents
          SET title = COALESCE($2, title),
              description = CASE WHEN $3::boolean THEN $4 ELSE description END,
+             category = CASE WHEN $5::boolean THEN $6 ELSE category END,
              updated_at = now()
          WHERE id = $1 AND deleted_at IS NULL
-         RETURNING id::text, title, description`,
-        [documentId, body.title ?? null, Object.hasOwn(body, "description"), body.description ?? null]
+         RETURNING id::text, title, description, category`,
+        [
+          documentId,
+          body.title ?? null,
+          Object.hasOwn(body, "description"),
+          body.description ?? null,
+          Object.hasOwn(body, "category"),
+          body.category ?? null
+        ]
       );
       return result.rows.length === 1
         ? { body: result.rows[0] }
@@ -1673,7 +1686,18 @@ async function searchAuthorizedDocuments(
     `SELECT d.id::text, d.title, d.description, d.category,
             d.folder_id::text, d.deleted_at, d.created_at,
             owner.display_name AS owner_name,
-            trustvault_authorize($1::uuid, d.id, 'document.grants.read') AS can_manage
+            CASE WHEN d.deleted_at IS NULL
+              THEN trustvault_authorize($1::uuid, d.id, 'document.edit_metadata')
+              ELSE false
+            END AS can_edit,
+            CASE WHEN d.deleted_at IS NULL
+              THEN trustvault_authorize($1::uuid, d.id, 'document.grants.read')
+              ELSE false
+            END AS can_manage,
+            CASE WHEN d.deleted_at IS NOT NULL
+              THEN trustvault_authorize($1::uuid, d.id, 'document.restore')
+              ELSE false
+            END AS can_restore
      FROM documents d
      JOIN users owner ON owner.id = d.owner_id
      JOIN LATERAL (

@@ -116,7 +116,8 @@ const mutations: Mutation[] = [
     name: "Remove deleted-document restore permission filter",
     file: "src/server/app.ts",
     from: `trustvault_authorize($1::uuid, d.id, 'document.restore')`,
-    to: "true"
+    to: "true",
+    occurrence: 2
   }
 ];
 

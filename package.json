@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
     "@types/react": "^18.3.18",
@@ -49,6 +50,7 @@
     "eslint-plugin-react-hooks": "^5.1.0",
     "eslint-plugin-react-refresh": "^0.4.16",
     "globals": "^15.14.0",
+    "jsdom": "^26.1.0",
     "supertest": "^7.0.0",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.1",

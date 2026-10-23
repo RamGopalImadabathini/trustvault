@@ -593,6 +593,19 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
     expect(ownerSearch.json().documents.map((item: { id: string }) => item.id)).toContain(
       documentId
     );
+    const ownerSearchDocument = ownerSearch.json().documents.find(
+      (item: { id: string }) => item.id === documentId
+    );
+    expect(ownerSearchDocument).toMatchObject({ can_edit: true, can_manage: true });
+    const sameFiltersSearch = await app.inject({
+      method: "GET",
+      url: `/api/search?name=${encodeURIComponent(testTitle)}&owner=Owner%20One&category=integration-category&from=${today}&to=${today}`,
+      headers: { cookie: owner.cookie }
+    });
+    expect(sameFiltersSearch.statusCode).toBe(200);
+    expect(sameFiltersSearch.json().results.map((item: { id: string }) => item.id)).toContain(
+      documentId
+    );
 
     const folder = await app.inject({
       method: "POST",
@@ -643,7 +656,10 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
     expect(filterSearch.json().results.map((item: { id: string }) => item.id)).toContain(
       documentId
     );
-
+    const readOnlySearchDocument = filterSearch.json().results.find(
+      (item: { id: string }) => item.id === documentId
+    );
+    expect(readOnlySearchDocument).toMatchObject({ can_edit: false, can_manage: false });
     const versions = await app.inject({
       method: "GET",
       url: `/api/documents/${documentId}/versions`,
@@ -690,6 +706,36 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       payload: { userId: otherViewer.id, level: "edit" }
     });
     expect(editGrant.statusCode).toBe(201);
+    const editCannotDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/documents/${documentId}`,
+      headers: { cookie: otherViewer.cookie, "x-csrf-token": otherViewer.csrf }
+    });
+    expect(editCannotDelete.statusCode).toBe(404);
+    const editorSearch = await app.inject({
+      method: "GET",
+      url: `/api/documents?name=${encodeURIComponent(testTitle)}`,
+      headers: { cookie: otherViewer.cookie }
+    });
+    const editorSearchDocument = editorSearch.json().documents.find(
+      (item: { id: string }) => item.id === documentId
+    );
+    expect(editorSearchDocument).toMatchObject({ can_edit: true, can_manage: false });
+    const editedMetadata = await app.inject({
+      method: "PATCH",
+      url: `/api/documents/${documentId}`,
+      headers: { cookie: otherViewer.cookie, "x-csrf-token": otherViewer.csrf },
+      payload: { title: testTitle, category: "integration-category-updated" }
+    });
+    expect(editedMetadata.statusCode).toBe(200);
+    expect(editedMetadata.json().category).toBe("integration-category-updated");
+    const restoreMetadata = await app.inject({
+      method: "PATCH",
+      url: `/api/documents/${documentId}`,
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf },
+      payload: { category: "integration-category" }
+    });
+    expect(restoreMetadata.statusCode).toBe(200);
     const versionForm = new FormData();
     versionForm.set(
       "file",

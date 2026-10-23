@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import "./style.css";
+import {
+  createDocumentSearchParams,
+  documentActionVisibility
+} from "./document-controls.js";
 
 interface User {
   id: string;
@@ -14,7 +18,9 @@ interface DocumentRecord {
   description: string | null;
   category: string | null;
   owner_name: string;
+  can_edit: boolean;
   can_manage: boolean;
+  can_restore: boolean;
   created_at: string;
   deleted_at: string | null;
 }
@@ -88,7 +94,13 @@ export function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [name, setName] = useState("");
+  const [owner, setOwner] = useState("");
   const [category, setCategory] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [includeDeleted, setIncludeDeleted] = useState(false);
+  const [editingDocument, setEditingDocument] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [targets, setTargets] = useState<GrantTarget[]>([]);
@@ -119,14 +131,20 @@ export function App() {
   }, []);
 
   const loadDocuments = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (query.trim()) params.set("q", query.trim());
-    if (category.trim()) params.set("category", category.trim());
+    const params = createDocumentSearchParams({
+      query,
+      name,
+      owner,
+      category,
+      from,
+      to,
+      includeDeleted
+    });
     const search = params.toString();
     const suffix = search ? `?${search}` : "";
     const body = await request<{ documents: DocumentRecord[] }>(`/api/documents${suffix}`);
     setDocuments(body.documents);
-  }, [category, query]);
+  }, [category, from, includeDeleted, name, owner, query, to]);
 
   useEffect(() => {
     void (async () => {
@@ -197,6 +215,74 @@ export function App() {
       formElement.reset();
       await loadDocuments();
       setMessage("Upload completed.");
+    });
+  }
+
+  async function saveMetadata(
+    event: FormEvent<HTMLFormElement>,
+    documentId: string
+  ) {
+    event.preventDefault();
+    if (!user) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    await run(async () => {
+      await request(
+        `/api/documents/${documentId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: String(form.get("title")),
+            category: String(form.get("category")) || null
+          })
+        },
+        user.csrfToken
+      );
+      setEditingDocument(null);
+      await loadDocuments();
+      setMessage("Document details updated.");
+    });
+  }
+
+  async function uploadVersion(
+    event: FormEvent<HTMLFormElement>,
+    documentId: string
+  ) {
+    event.preventDefault();
+    if (!user) return;
+    const formElement = event.currentTarget;
+    await run(async () => {
+      await request(
+        `/api/documents/${documentId}/versions`,
+        { method: "POST", body: new FormData(formElement) },
+        user.csrfToken
+      );
+      formElement.reset();
+      await loadDocuments();
+      setMessage("New version uploaded.");
+    });
+  }
+
+  async function deleteDocument(documentId: string) {
+    if (!user || !window.confirm("Delete this document?")) return;
+    await run(async () => {
+      await request(`/api/documents/${documentId}`, { method: "DELETE" }, user.csrfToken);
+      await loadDocuments();
+      setMessage("Document deleted.");
+    });
+  }
+
+  async function restoreDocument(documentId: string) {
+    if (!user) return;
+    await run(async () => {
+      await request(
+        `/api/documents/${documentId}/restore`,
+        { method: "POST" },
+        user.csrfToken
+      );
+      await loadDocuments();
+      setMessage("Document restored.");
     });
   }
 
@@ -359,8 +445,13 @@ export function App() {
       <section className="panel">
         <div className="section-heading"><div><h2>Documents</h2><p>Only documents currently available to your account appear here.</p></div></div>
         <form className="filters" onSubmit={(event) => { event.preventDefault(); void run(loadDocuments); }}>
-          <label>Search<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or description" /></label>
+          <label>Search<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Any text" /></label>
+          <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Document name" /></label>
+          <label>Owner<input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="Owner name" /></label>
           <label>Category<input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Any category" /></label>
+          <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+          <label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+          <label className="checkbox-filter"><input type="checkbox" checked={includeDeleted} onChange={(event) => setIncludeDeleted(event.target.checked)} />Include deleted</label>
           <button type="submit">Search</button>
         </form>
         {documents.length === 0 ? <p className="empty">No accessible documents found.</p> : (
@@ -369,10 +460,26 @@ export function App() {
               <article className="document" key={document.id}>
                 <div><h3>{document.title}</h3><p>{document.category || "Uncategorised"} · {document.owner_name} · {new Date(document.created_at).toLocaleDateString()}</p></div>
                 <div className="actions">
-                  <a className="button-link" href={`/api/documents/${document.id}/download`}>Download</a>
-                  {document.can_manage && <button className="secondary" onClick={() => void openSharing(document.id)}>Share</button>}
-                  {document.can_manage && <button className="secondary" onClick={() => void suggest(document.id)}>Suggest viewers</button>}
+                  {!document.deleted_at && <a className="button-link" href={`/api/documents/${document.id}/download`}>Download</a>}
+                  {documentActionVisibility(document).edit && <button className="secondary" onClick={() => setEditingDocument(editingDocument === document.id ? null : document.id)}>Edit</button>}
+                  {documentActionVisibility(document).share && <button className="secondary" onClick={() => void openSharing(document.id)}>Share</button>}
+                  {documentActionVisibility(document).suggest && <button className="secondary" onClick={() => void suggest(document.id)}>Suggest viewers</button>}
+                  {documentActionVisibility(document).delete && !document.deleted_at && <button className="text-button" onClick={() => void deleteDocument(document.id)}>Delete</button>}
+                  {documentActionVisibility(document).restore && <button className="secondary" onClick={() => void restoreDocument(document.id)}>Restore</button>}
                 </div>
+                {editingDocument === document.id && documentActionVisibility(document).edit && (
+                  <div className="document-editor">
+                    <form className="inline-form" onSubmit={(event) => void saveMetadata(event, document.id)}>
+                      <label>Title<input name="title" defaultValue={document.title} maxLength={500} required /></label>
+                      <label>Category<input name="category" defaultValue={document.category ?? ""} maxLength={100} /></label>
+                      <button type="submit">Save details</button>
+                    </form>
+                    <form className="inline-form" onSubmit={(event) => void uploadVersion(event, document.id)}>
+                      <label>New version<input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.txt" required /></label>
+                      <button type="submit">Upload version</button>
+                    </form>
+                  </div>
+                )}
               </article>
             ))}
           </div>
