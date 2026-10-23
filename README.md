@@ -275,7 +275,7 @@ Last run: 12 mutations; all were killed by at least one failing test. Each mutat
 | Remove active-document SQL permission filter | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route` |
 | Remove deleted-document restore permission filter | KILLED | `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `revokes sessions after a role change or deactivation` |
 
-## Additional unbuilt features
+## What I chose not to build, and why
 
 - Folder inheritance and group-derived grants: folders and groups are organizational only; adding indirect authorization would expand the permission and revocation surface.
 - Preview rendering, archive extraction, and export endpoints: files are downloaded only as attachments; archives are rejected to avoid ZIP-bomb/extraction exposure.
