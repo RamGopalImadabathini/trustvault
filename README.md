@@ -1,6 +1,6 @@
 # TrustVault
 
-TrustVault is a security-focused document-sharing platform. Phases 1–8 are implemented with PostgreSQL schema and least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a minimal React/Vite client. File uploads fail closed unless a real malware scanner is wired into the API composition. Production deployment and external audit anchoring remain operator work.
+TrustVault is a security-focused document-sharing platform. Phases 1–8 are implemented with PostgreSQL schema and least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a minimal React/Vite client. Uploads fail closed unless a malware scanner is explicitly configured. Production deployment and external audit anchoring remain operator work.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ Each accepted file gets a random storage key and a per-file AES-256-GCM data key
 
 Uploads are limited to 10 MiB and an allowlist of PDF, PNG, JPEG, and UTF-8 text; extension, declared MIME, and magic bytes must match. Filenames are normalized and stripped of path components/control characters. Archives are not accepted, so the implementation does not extract archives or process ZIP bombs. Downloads set attachment disposition and `X-Content-Type-Options: nosniff`.
 
-**Malware scanning is fail-closed but not yet wired to a provider.** `createApp()` accepts a pluggable `malwareScanner` callback; without one, valid uploads return `503 Uploads temporarily unavailable` and are audited. The integration tests inject a test scanner that returns `clean`; this is not an antivirus product. Connect a real scanner before enabling uploads in a deployment. Seeded demo files are trusted fixtures and are marked clean.
+Scanning is fail-closed by default: when `MALWARE_SCANNER` is unset or names an unsupported provider, valid uploads return `503 Uploads temporarily unavailable` and the denied attempt is audited. Set `MALWARE_SCANNER=local-basic` to opt into the built-in demo-grade scanner. It rejects the EICAR test string, MZ/ELF/Mach-O executable headers, and selected script/macro markers; it is heuristic and is **not a malware-detection product or a replacement for ClamAV**. It cannot reliably identify unknown, obfuscated, or encoded threats. Use an integrated ClamAV provider for production; do not treat `local-basic` as production protection. Unsupported provider names are reported at startup and leave uploads unavailable rather than bypassing scanning. `createApp()` also accepts a pluggable `malwareScanner` callback for tests and provider integrations. Seeded demo files are trusted fixtures and are marked clean.
 
 Downloads decrypt files of at most 10 MiB into memory before streaming. This bounds memory use but is not a large-file streaming design.
 
@@ -60,7 +60,7 @@ The web interface is intentionally minimal: login, accessible document search/li
 
 ## Deliberate omissions and operational limits
 
-- No malware engine is bundled. Integrating an unconfigured or fake scanner would create a success-shaped security gap, so uploads remain unavailable until a real provider is injected.
+- No production-grade malware engine is bundled. `local-basic` is a demo-grade heuristic only; with no recognized scanner, uploads remain unavailable rather than being accepted.
 - Archives and preview rendering are not supported. This avoids archive extraction/ZIP-bomb exposure and prevents active document content from being rendered inline.
 - Groups do not grant document access; adding group-derived authorization would change revocation and permission semantics.
 - No hosted AI provider, API key, or automatic grant application is configured. Provider use must be explicitly wired, and all suggestions remain owner-reviewed and non-authoritative.
@@ -82,6 +82,7 @@ Every request reads the current session and grant state; there is no cross-reque
 | `SESSION_SECRET` | Yes | Signs CSRF tokens |
 | `PORT` | No; default `3000` | API listen port |
 | `STORAGE_DIRECTORY` | No; default `storage` | Private encrypted-file directory; use persistent private storage |
+| `MALWARE_SCANNER` | No; unset or unknown rejects uploads | Set to `local-basic` for demo-grade scanning; use ClamAV for production |
 | `NODE_ENV` | No; Docker sets `production` | Runtime mode; demo seeding refuses production by default |
 | `POSTGRES_MIGRATOR_PASSWORD` | Docker Compose only | PostgreSQL migrator role password |
 | `POSTGRES_APP_PASSWORD` | Docker Compose only | PostgreSQL application role password |
@@ -89,28 +90,22 @@ Every request reads the current session and grant state; there is no cross-reque
 
 `MASTER_KEY`, `AUDIT_HMAC_SECRET`, and `SESSION_SECRET` must each be at least 32 UTF-8 bytes. Startup validates all required API variables together and prints invalid variable names, never values. Keep `.env` out of Git and use distinct randomly generated values for every environment.
 
+`MALWARE_SCANNER` supports only the explicit `local-basic` provider in this build. Leaving it unset or setting an unknown provider keeps uploads fail-closed, including in production. The demo scanner checks a short list of raw byte/text markers and is not a substitute for ClamAV; integrating a production provider requires wiring its scanner callback.
+
 ## Local development on Windows
 
-Use Node.js 20 as specified by `package.json`. PostgreSQL 16 is the Compose target. This repository was exercised in the current environment against an isolated PostgreSQL 18 instance because Docker was unavailable; the host also had Node 24, so the `>=20 <21` engine target was not directly validated here.
+Use Node.js 20 as specified by `package.json`. Compose uses PostgreSQL 16 on Debian Bookworm. Node 24 is outside the supported `>=20 <21` engine range and npm reports an engine warning when it is used.
 
-1. Copy `.env.example` to `.env`; replace every placeholder with unique secrets and configure both database URLs. For Compose, use host port `5432` in the URLs; Compose binds PostgreSQL to `127.0.0.1` only.
-2. Start the database, install dependencies, migrate, and seed:
-
-   ```powershell
-   docker compose --profile local up -d db
-   npm ci
-   npm run db:migrate
-   npm run seed
-   ```
-
-3. Start the API and check health:
+1. Copy `.env.example` to `.env`; replace every placeholder with unique secrets and configure both database URLs. For Compose, use host port `5432` in the URLs; Compose binds PostgreSQL to `127.0.0.1` only. Set `MALWARE_SCANNER=local-basic` for demo uploads; keep it unset to reject uploads.
+2. Start the database, migrate, seed, and launch the API and UI with the one-command local setup:
 
    ```powershell
-   npm run dev
-   Invoke-RestMethod http://127.0.0.1:3000/healthz
+   npm run start:local
    ```
 
-   `npm run dev:web` starts the Vite development server separately at `http://localhost:5173`; it proxies `/api` to `http://127.0.0.1:3000` by default. Set `TRUSTVAULT_API_TARGET` if the API is at another origin. To run the Compose stack, use `docker compose --profile local up -d --build`; run the demo seed service with `docker compose --profile local run --rm seed`.
+   The script ensures `D:\` is on `PATH`, checks Docker, starts only the Compose database, waits for port 5432, runs the idempotent migration and seed commands, starts API/UI terminals if they are not already healthy, and prints the URLs and demo accounts. Install dependencies separately with `npm ci` if `node_modules` is not present.
+
+   API health is available at `http://127.0.0.1:3000/healthz`. The UI is at `http://127.0.0.1:5173` and proxies `/api` to the API by default. Set `TRUSTVAULT_API_TARGET` if the API is at another origin. Docker Compose is used only for the database by `start:local`; the API and UI run through npm.
 
 ## Deployment
 
@@ -118,7 +113,7 @@ Build and run the runtime image with Docker or a compatible container platform. 
 
 Required host variable names: `DATABASE_URL`, `DB_MIGRATION_URL`, `MASTER_KEY`, `AUDIT_HMAC_SECRET`, `SESSION_SECRET`. Also set `PORT` when the host does not use 3000 and `STORAGE_DIRECTORY` when persistent storage is mounted elsewhere. For the provided Compose database, additionally configure `POSTGRES_MIGRATOR_PASSWORD` and `POSTGRES_APP_PASSWORD`. Supply values through the host's secret manager; do not place them in Dockerfile instructions, image layers, source control, or deployment logs. Use unique independent 32-byte-minimum secrets and separate database roles.
 
-The repository does not configure a malware scanner. Consequently, the deployed API fails closed on upload until `malwareScanner` is wired into the server composition. The smoke script can test a pre-seeded document without upload, or test an actual upload when `TRUSTVAULT_SMOKE_FILE` is provided after a real scanner is integrated.
+The deployed API fails closed on upload when `MALWARE_SCANNER` is unset. Do not use `local-basic` as production protection; integrate ClamAV or another production-grade scanner provider before accepting production uploads. The smoke script can test a pre-seeded document without upload, or test an actual upload when `TRUSTVAULT_SMOKE_FILE` is provided after a production scanner is integrated.
 
 To smoke-test an HTTPS deployment, set the smoke-only environment values `TRUSTVAULT_BASE_URL`, `TRUSTVAULT_OWNER_EMAIL`, `TRUSTVAULT_OWNER_PASSWORD`, `TRUSTVAULT_VIEWER_EMAIL`, `TRUSTVAULT_VIEWER_PASSWORD`, `TRUSTVAULT_ADMIN_EMAIL`, and `TRUSTVAULT_ADMIN_PASSWORD`, then run:
 
@@ -127,7 +122,7 @@ npm ci
 npm run smoke-test
 ```
 
-The script discovers the owner's first accessible document if `TRUSTVAULT_DOCUMENT_ID` is omitted. To include an upload, also set `TRUSTVAULT_SMOKE_FILE` to a valid PDF after a real scanner provider has been integrated. Smoke-test credentials are script inputs, not application host settings; keep them out of logs and remove them after use.
+The script discovers the owner's first accessible document if `TRUSTVAULT_DOCUMENT_ID` is omitted. To include an upload, also set `TRUSTVAULT_SMOKE_FILE` to a valid PDF after a production-grade scanner provider has been integrated. Smoke-test credentials are script inputs, not application host settings; keep them out of logs and remove them after use.
 
 The seed command creates one admin, two owners, and three viewers. All six use the **demo-only** password `TrustVault-Local-Demo-2026!`:
 
@@ -144,7 +139,7 @@ The demo password is public and must never be used outside a local demonstration
 
 ### PowerShell API walkthrough
 
-The cookie is marked `Secure`, as required. For local plain-HTTP API calls, the following example forwards the cookie explicitly rather than relying on a browser's cookie policy. It uses an existing seeded document. **A new upload returns 503 until a real malware-scanner callback is wired into the API.** Do not bypass the scanner to make an upload appear successful.
+The cookie is marked `Secure`, as required. For local plain-HTTP API calls, the following example forwards the cookie explicitly rather than relying on a browser's cookie policy. It uses an existing seeded document. **A new upload returns 503 when `MALWARE_SCANNER` is unset.** Do not bypass the scanner to make an upload appear successful.
 
 ```powershell
 $base = "http://127.0.0.1:3000"
@@ -199,7 +194,7 @@ $afterRevokeStatus = curl.exe -sS -o (Join-Path $temp "after-revoke.json") -w "%
 # Revoke=200, DownloadAfterRevoke=404.
 Write-Output "Grant=$grantStatus; TokenIssue=$token1Status/$token2Status; Download=$downloadStatus; Revoke=$revokeStatus; DownloadAfterRevoke=$afterRevokeStatus"
 
-# New uploads intentionally fail closed without a scanner provider.
+# New uploads intentionally fail closed when MALWARE_SCANNER is unset.
 $pdf = Join-Path $temp "sample.pdf"
 Set-Content -Path $pdf -Value "%PDF-1.7 demo" -NoNewline -Encoding ascii
 $uploadStatus = curl.exe -sS -o (Join-Path $temp "upload.json") -w "%{http_code}" `
@@ -210,7 +205,7 @@ Write-Output "Upload without scanner=$uploadStatus (expected 503)"
 Remove-Item -LiteralPath $temp -Recurse -Force
 ```
 
-For an end-to-end *new upload* flow, configure a real `malwareScanner` provider in the application composition and test that provider before deployment. Integration tests use a test-only scanner callback and exercise upload, grant, download, token replay/sharing, revocation, and the cross-user denial matrix.
+For an end-to-end *new upload* flow, set `MALWARE_SCANNER=local-basic` for a local demo, or wire and test a production-grade scanner callback before deployment. Integration tests use a test-only scanner callback and exercise upload, grant, download, token replay/sharing, revocation, and the cross-user denial matrix.
 
 ## Tests and checks
 
@@ -230,7 +225,7 @@ The PostgreSQL integration suite runs when `DATABASE_URL` is configured and `TRU
 
 ### Mutation-check results
 
-Last run: 11 mutations; all were killed by at least one failing test. Each mutation runs the complete test suite. The runner restores each file in a `finally` block and exits nonzero for any survivor, adapter error, or test-run error.
+Last run: 12 mutations; all were killed by at least one failing test. Each mutation runs the complete test suite. The runner restores each file in a `finally` block and exits nonzero for any survivor, adapter error, or test-run error.
 
 | Mutation | Result | Failing test(s) |
 |---|---|---|
@@ -241,6 +236,7 @@ Last run: 11 mutations; all were killed by at least one failing test. Each mutat
 | Accept non-PostgreSQL database URLs | KILLED | `loadConfig rejects unsupported or malformed database URLs` (three invalid URL cases) |
 | Bypass document `authorize()` call site | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `revokes sessions after a role change or deactivation` |
 | Bypass framework failure `authorize()` call site | KILLED | `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route`; `audits unmatched routes and malformed requests` |
+| Allow uploads without a malware scanner | KILLED | `enforces cross-user access, download, audit, and immediate revocation` |
 | Disable route-registry authorization guard | KILLED | `route authorization registry refuses to start with a missing or unknown route action` |
 | Disable `audit_log` insert | KILLED | `health endpoint fails closed when the audit write cannot be persisted`; `audit chain serializes append and writes denied events with chained hashes`; integration test `enforces cross-user access, download, audit, and immediate revocation` |
 | Remove active-document SQL permission filter | KILLED | `enforces cross-user access, download, audit, and immediate revocation`; `keeps search, folders, versions, AI decisions, and admin metadata scoped`; `denies an ungranted caller on every document-content and permission route` |
@@ -250,6 +246,6 @@ Last run: 11 mutations; all were killed by at least one failing test. Each mutat
 
 - Folder inheritance and group-derived grants: folders and groups are organizational only; adding indirect authorization would expand the permission and revocation surface.
 - Preview rendering, archive extraction, and export endpoints: files are downloaded only as attachments; archives are rejected to avoid ZIP-bomb/extraction exposure.
-- A bundled malware-scanning engine or hosted AI provider: no scanner/provider is silently assumed available; uploads fail closed, and AI uses the deterministic fallback unless explicitly configured.
+- A production malware-scanning engine or hosted AI provider: `local-basic` is demo-grade only; uploads fail closed unless a provider is explicitly selected, and AI uses the deterministic fallback unless explicitly configured.
 - External audit anchoring and a live production deployment: a database superuser with the HMAC key remains able to forge the chain, so production needs an independent anchor and deployment review.
 - A production frontend hosting configuration: Vite serves the client only for local development; production must separately host the built client and preserve same-origin secure-cookie/CSRF behavior.

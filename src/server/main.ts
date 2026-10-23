@@ -3,6 +3,7 @@ import path from "node:path";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db.js";
+import { createMalwareScanner } from "./malware-scanner.js";
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -16,10 +17,18 @@ async function main(): Promise<void> {
   const pool = createPool(config);
   try {
     await pool.query("SELECT 1");
+    const scannerProvider = process.env.MALWARE_SCANNER;
+    const malwareScanner = createMalwareScanner(scannerProvider);
+    if (scannerProvider?.trim() && !malwareScanner) {
+      console.warn(
+        "Unsupported MALWARE_SCANNER provider; uploads will remain unavailable."
+      );
+    }
     const app = createApp({
       pool,
       config,
-      storageDirectory: path.resolve(process.env.STORAGE_DIRECTORY ?? "storage")
+      storageDirectory: path.resolve(process.env.STORAGE_DIRECTORY ?? "storage"),
+      malwareScanner
     });
     await app.listen({ host: "0.0.0.0", port });
     console.info(`TrustVault API listening on port ${port}`);

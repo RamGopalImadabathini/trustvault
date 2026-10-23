@@ -87,6 +87,12 @@ const mutations: Mutation[] = [
     to: "const allowed = true;"
   },
   {
+    name: "Allow uploads without a malware scanner",
+    file: "src/server/app.ts",
+    from: "if (!dependencies.malwareScanner) {",
+    to: "if (dependencies.malwareScanner) {"
+  },
+  {
     name: "Disable route-registry authorization guard",
     file: "src/server/authorization.ts",
     from: "if (missing.length > 0) {",

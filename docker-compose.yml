@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16-bookworm
     environment:
       POSTGRES_DB: trustvault
       POSTGRES_USER: trustvault_migrator
@@ -60,6 +60,7 @@ services:
       MASTER_KEY: ${MASTER_KEY:?Set MASTER_KEY in .env}
       AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:?Set AUDIT_HMAC_SECRET in .env}
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      MALWARE_SCANNER: ${MALWARE_SCANNER:-}
       PORT: "3000"
       STORAGE_DIRECTORY: /app/storage
     ports:

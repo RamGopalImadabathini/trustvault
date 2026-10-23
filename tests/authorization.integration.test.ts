@@ -9,6 +9,7 @@ import { createApp } from "../src/server/app.js";
 import { verifyAuditChain } from "../src/server/audit.js";
 import { loadConfig } from "../src/server/config.js";
 import { createPool } from "../src/server/db.js";
+import { createMalwareScanner } from "../src/server/malware-scanner.js";
 
 const enabled =
   Boolean(process.env.DATABASE_URL) &&
@@ -37,7 +38,7 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       pool,
       config,
       storageDirectory: path.resolve(process.env.STORAGE_DIRECTORY ?? "storage"),
-      malwareScanner: async () => "clean"
+      malwareScanner: createMalwareScanner("local-basic")
     });
     await app.listen({ host: "127.0.0.1", port: 0 });
     const address = app.server.address();
@@ -109,10 +110,10 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
     form.set("category", "integration-category");
     form.set(
       "file",
-      new Blob(["%PDF-1.7 trusted demo document\n"], {
-        type: "application/pdf"
+      new Blob(["A trusted demo document for integration.\n"], {
+        type: "text/plain"
       }),
-      "test.pdf"
+      "test.txt"
     );
     const uploadResponse = await fetch(`${baseUrl}/api/documents`, {
       method: "POST",
@@ -122,6 +123,7 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       },
       body: form
     });
+
     expect(uploadResponse.status).toBe(201);
     const uploadBody = (await uploadResponse.json()) as { id: string };
     documentId = uploadBody.id;
@@ -130,6 +132,38 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       [documentId]
     );
     uploadStorageKey = storedFile.rows[0]?.storage_key ?? "";
+
+    const eicarStart = new Date();
+    const eicarForm = new FormData();
+    eicarForm.set("title", `${testTitle}-eicar`);
+    eicarForm.set(
+      "file",
+      new Blob(
+        [
+          "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+        ],
+        { type: "text/plain" }
+      ),
+      "eicar.txt"
+    );
+    const rejectedUpload = await fetch(`${baseUrl}/api/documents`, {
+      method: "POST",
+      headers: {
+        Cookie: owner.cookie,
+        "x-csrf-token": owner.csrf
+      },
+      body: eicarForm
+    });
+    expect(rejectedUpload.status).toBe(400);
+    expect(await rejectedUpload.json()).toEqual({ error: "Invalid upload" });
+    const eicarAudit = await pool.query(
+      `SELECT 1 FROM audit_log
+       WHERE actor_id = $1 AND action = 'document.create'
+         AND outcome = 'denied' AND reason = 'request_rejected'
+         AND occurred_at >= $2`,
+      [owner.id, eicarStart]
+    );
+    expect(eicarAudit.rowCount).toBeGreaterThan(0);
 
     const ownerGrant = await app.inject({
       method: "POST",
@@ -465,6 +499,7 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       config: loadConfig(process.env),
       storageDirectory
     });
+    const auditStartedAt = new Date();
     await noScannerApp.listen({ host: "127.0.0.1", port: 0 });
     try {
       const address = noScannerApp.server.address();
@@ -495,13 +530,23 @@ describe.skipIf(!enabled)("PostgreSQL authorization and revocation integration",
       expect(await noScannerResponse.json()).toEqual({
         error: "Uploads temporarily unavailable"
       });
-      const scannerAudit = await pool.query<{ action: string; outcome: string }>(
-        `SELECT action, outcome FROM audit_log
-         ORDER BY audit_log.id DESC LIMIT 1`
+      const scannerAudit = await pool.query<{
+        actor_id: string;
+        action: string;
+        outcome: string;
+        reason: string;
+      }>(
+        `SELECT actor_id::text, action, outcome, reason FROM audit_log
+         WHERE actor_id = $1 AND action = 'document.create'
+           AND occurred_at >= $2
+         ORDER BY id DESC`,
+        [owner.id, auditStartedAt]
       );
       expect(scannerAudit.rows[0]).toEqual({
+        actor_id: owner.id,
         action: "document.create",
-        outcome: "denied"
+        outcome: "denied",
+        reason: "request_rejected"
       });
     } finally {
       await noScannerApp.close();
