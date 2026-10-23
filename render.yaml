@@ -32,4 +32,5 @@ databases:
   - name: trustvault-db
     databaseName: trustvault
     user: trustvault_owner
-    plan: basic-256mb
+    plan: free
+    
