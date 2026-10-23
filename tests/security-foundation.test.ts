@@ -6,6 +6,12 @@ const migrationSql = readFileSync(
   path.join(process.cwd(), "db", "migrations", "001_initial_schema.sql"),
   "utf8"
 );
+const setupScript = readFileSync(
+  path.join(process.cwd(), "deploy", "ec2", "setup.sh"),
+  "utf8"
+);
+const gitIgnore = readFileSync(path.join(process.cwd(), ".gitignore"), "utf8");
+const viteConfig = readFileSync(path.join(process.cwd(), "vite.config.ts"), "utf8");
 
 describe("phase 1 security foundation", () => {
   it("rejects public schema privileges on the migration", () => {
@@ -54,4 +60,23 @@ describe("phase 1 security foundation", () => {
     expect(migrationSql).not.toContain("GRANT ALL ON SCHEMA public");
   });
 
+  it("installs EC2 dependencies without conflicting with Amazon Linux curl-minimal", () => {
+    expect(setupScript).toContain("sudo dnf install -y docker git openssl");
+    expect(setupScript).not.toMatch(/dnf install[^\n]*\bcurl\b/);
+  });
+
+  it("preserves an existing EC2 environment file and creates it exclusively", () => {
+    expect(setupScript).toContain('if [[ ! -e "$REPO_DIR/.env" && ! -L "$REPO_DIR/.env" ]]');
+    expect(setupScript).toContain("set -o noclobber");
+    expect(setupScript).toContain("chmod 600 \"$REPO_DIR/.env\"");
+  });
+
+  it("ignores VSIX packages", () => {
+    expect(gitIgnore.split(/\r?\n/)).toContain("*.vsix");
+  });
+
+  it("does not configure a Vite allowed-host workaround", () => {
+    expect(viteConfig).not.toContain("allowedHosts");
+    expect(viteConfig).not.toContain("VITE_ALLOWED_HOSTS");
+  });
 });

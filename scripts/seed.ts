@@ -6,8 +6,8 @@ import { loadConfig } from "../src/server/config.js";
 import { appendAudit } from "../src/server/audit.js";
 import { createPool } from "../src/server/db.js";
 import { encryptAndStore, removeStoredFile, validateUpload } from "../src/server/storage.js";
+import { getSeedDemoPassword } from "./seed-password.js";
 
-const DEMO_PASSWORD = "TrustVault-Local-Demo-2026!";
 const DEMO_USERS = [
   { email: "admin@trustvault.local", name: "Demo Admin", role: "admin" },
   { email: "owner.one@trustvault.local", name: "Owner One", role: "owner" },
@@ -19,14 +19,12 @@ const DEMO_USERS = [
 const STORAGE_DIRECTORY = path.resolve(process.env.STORAGE_DIRECTORY ?? "storage");
 
 async function seed(): Promise<void> {
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEMO_SEED !== "true") {
-    throw new Error("Refusing demo seed in production without ALLOW_DEMO_SEED=true.");
-  }
+  const seedPassword = getSeedDemoPassword(process.env);
   const config = loadConfig(process.env);
   const pool = createPool(config);
   const client = await pool.connect();
   const createdStorageKeys: string[] = [];
-  const passwordHash = await argon2.hash(DEMO_PASSWORD, {
+  const passwordHash = await argon2.hash(seedPassword, {
     type: argon2.argon2id,
     memoryCost: 65_536,
     timeCost: 3,

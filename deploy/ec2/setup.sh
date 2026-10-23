@@ -17,7 +17,7 @@ if [[ ! -f "$REPO_DIR/package.json" ]]; then
 fi
 cd "$REPO_DIR"
 
-sudo dnf install -y docker curl git openssl
+sudo dnf install -y docker git openssl
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$APP_USER"
 
@@ -49,6 +49,12 @@ nvm install 20
 nvm use 20
 
 if [[ ! -e "$REPO_DIR/.env" && ! -L "$REPO_DIR/.env" ]]; then
+  read -r -s -p "Set a production seed password (12+ URL-safe characters): " seed_demo_password
+  printf '\n'
+  if [[ ! "$seed_demo_password" =~ ^[A-Za-z0-9_-]{12,}$ ]]; then
+    printf 'SEED_DEMO_PASSWORD must contain at least 12 URL-safe characters.\n' >&2
+    exit 1
+  fi
   migrator_password="$(openssl rand -hex 32)"
   app_password="$(openssl rand -hex 32)"
   master_key="$(openssl rand -hex 32)"
@@ -65,12 +71,14 @@ if [[ ! -e "$REPO_DIR/.env" && ! -L "$REPO_DIR/.env" ]]; then
       printf 'MASTER_KEY=%s\n' "$master_key"
       printf 'AUDIT_HMAC_SECRET=%s\n' "$audit_secret"
       printf 'SESSION_SECRET=%s\n' "$session_secret"
+      printf 'SEED_DEMO_PASSWORD=%s\n' "$seed_demo_password"
     } > "$REPO_DIR/.env"
   ); then
     printf 'Refusing to overwrite an existing .env file.\n' >&2
     exit 1
   fi
   chmod 600 "$REPO_DIR/.env"
+  unset seed_demo_password migrator_password app_password master_key audit_secret session_secret
 fi
 
 sudo -u "$APP_USER" env DOCKER_CONFIG="$APP_HOME/.docker" \
@@ -78,7 +86,7 @@ sudo -u "$APP_USER" env DOCKER_CONFIG="$APP_HOME/.docker" \
 npm ci
 npm run build:all
 npm run db:migrate
-npm run seed
+NODE_ENV=production npm run seed
 
 sudo install -m 644 "$REPO_DIR/deploy/ec2/trustvault.service" \
   /etc/systemd/system/trustvault.service
