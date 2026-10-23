@@ -1,0 +1,19 @@
+[Unit]
+Description=TrustVault Cloudflare quick tunnel
+After=network-online.target trustvault.service
+Wants=network-online.target
+Requires=trustvault.service
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+Environment=HOME=/home/ec2-user
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3000
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ec2-user/tunnel.log
+StandardError=append:/home/ec2-user/tunnel.log
+
+[Install]
+WantedBy=multi-user.target

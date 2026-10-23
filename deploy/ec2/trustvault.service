@@ -1,0 +1,18 @@
+[Unit]
+Description=TrustVault production application
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/trustvault
+EnvironmentFile=/home/ec2-user/trustvault/.env
+Environment=NODE_ENV=production
+ExecStart=/bin/bash -lc 'source /home/ec2-user/.nvm/nvm.sh && nvm use 20 --silent >/dev/null && npm run start:prod'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
