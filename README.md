@@ -2,6 +2,8 @@
 
 TrustVault is a security-focused document-sharing platform with PostgreSQL least-privilege roles, server-side sessions, centralized authorization, encrypted storage, permission-filtered search, organizational folders, document versions, admin audit/anomaly views, metadata-only AI suggestions, and a React/Vite client. Uploads fail closed unless a malware scanner is explicitly configured. The included EC2 setup is a demonstration deployment; it does not replace a production ingress, malware scanner, or independent audit anchor.
 
+Full project documentation: [docs/PROJECT_DOCUMENTATION.md](docs/PROJECT_DOCUMENTATION.md)
+
 ## Architecture
 
 - Node.js 20, TypeScript, Fastify, PostgreSQL, React and Vite.
