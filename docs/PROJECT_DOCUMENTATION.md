@@ -155,18 +155,18 @@ The knowingly accepted items are:
 
 ## 12. Demo accounts
 
-These are local demo accounts created by `scripts/seed.ts`; the listed six identities and their roles are the entries in that seed script.
+| Role | Email | Password | Notes |
+|---|---|---|---|
+| admin | `admin@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
+| owner one | `owner.one@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
+| owner two | `owner.two@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
+| viewer one | `viewer.one@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
+| viewer two | `viewer.two@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
+| viewer three | `viewer.three@trustvault.local` | `TrustVault-Local-Demo-2026!` | Local seed default; override with `SEED_DEMO_PASSWORD` |
 
-| Email | Role |
-|---|---|
-| `admin@trustvault.local` | admin |
-| `owner.one@trustvault.local` | owner |
-| `owner.two@trustvault.local` | owner |
-| `viewer.one@trustvault.local` | viewer |
-| `viewer.two@trustvault.local` | viewer |
-| `viewer.three@trustvault.local` | viewer |
+These are local demo accounts created by the seed script. The password is public in this repository. Any internet-facing deployment must set its own SEED_DEMO_PASSWORD and reseed.
 
-The local seed password is **`TrustVault-Local-Demo-2026!`**, as defined by `scripts/seed-password.ts` when `SEED_DEMO_PASSWORD` is not supplied outside production. This demo password is public in this repository. Any internet-facing deployment must set its own unique `SEED_DEMO_PASSWORD`; production seeding refuses to proceed if it is missing or blank. Do not reuse the local demo password in a deployment.
+The table shows the local default from `scripts/seed-password.ts`. Production seeding refuses to proceed if `SEED_DEMO_PASSWORD` is missing or blank; do not reuse the local demo password in a deployment.
 
 ## 13. Environment variables
 
